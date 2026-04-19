@@ -20,8 +20,19 @@ export default function App() {
     });
 
     const data = await res.json();
+    if (!res.ok) {
+      setResult({
+        action: "Could not generate next action",
+        reason: data.error ?? `Server error (${res.status})`,
+        steps: ["Check tasks (one per line)", "Set time available > 0", "Retry"],
+        risk: "—",
+        future_impact: "—",
+        confidence: 50,
+      });
+      return;
+    }
     setResult(data);
-  } catch (err) {
+  } catch {
     setResult({
       action: "Backend not connected yet",
       reason: "We still need to start the server",

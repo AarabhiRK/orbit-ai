@@ -1,66 +1,46 @@
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
+import express from "express"
+import cors from "cors"
+import dotenv from "dotenv"
+import { ValidationError } from "./src/parseBody.js"
+import { generateNextAction } from "./src/generateNextAction.js"
 
-dotenv.config();
+dotenv.config()
 
-const app = express();
+const app = express()
+app.use(cors())
+app.use(express.json())
 
-app.use(cors());
-app.use(express.json());
+const PORT = Number(process.env.PORT) || 5000
 
-// health check
 app.get("/", (_req, res) => {
-  res.send("ORBIT backend is running 🚀");
-});
+  res.type("text/plain").send("ORBIT backend is running 🚀")
+})
 
 app.get("/health", (_req, res) => {
   res.json({
+    ok: true,
     status: "ok",
+    service: "orbit-backend",
     system: "ORBIT AI backend online",
-  });
-});
+  })
+})
 
-// main orbit route
 app.post("/generate-next-action", (req, res) => {
   try {
-    const { tasks, mood, time, goals } = req.body;
-
-    // temperorary stub, AI agent pipeline later
-    return res.json({
-      action: "Start CS178 homework (25 min)",
-      steps: [
-        "Open assignment",
-        "Complete first problem",
-        "Review solution"
-      ],
-      reason: "High urgency + aligns with academic goals",
-      risk: "Delay will increase stress tomorrow",
-      future_impact: "Finishing now frees time for internship applications later",
-      confidence: 90,
-
-      // 🔥 DEBUG (useful for demo transparency)
-      debug: {
-        received: {
-          tasks,
-          mood,
-          time,
-          goals
-        },
-        system: "stub-mode"
-      }
-    });
-
+    const payload = generateNextAction(req.body ?? {})
+    return res.json(payload)
   } catch (err) {
-    console.error("ORBIT ERROR:", err);
-
+    if (err instanceof ValidationError) {
+      return res.status(400).json({ error: err.message })
+    }
+    console.error("ORBIT ERROR:", err)
     return res.status(500).json({
       error: "Something went wrong in ORBIT backend",
       system: "failure",
-    });
+    })
   }
-});
+})
 
-app.listen(5000, () => {
-  console.log("ORBIT server running on http://localhost:5000 🚀");
-});
+app.listen(PORT, () => {
+  console.log(`ORBIT server running on http://localhost:${PORT} 🚀`)
+})
