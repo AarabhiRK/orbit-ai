@@ -57,6 +57,8 @@ export async function polishOrbitNarrative(payload) {
     },
   })
 
+  const recentRuns = payload.debug?.received?.memory?.recentRuns ?? []
+
   const brief = JSON.stringify({
     recommended_action: payload.action,
     deterministic_reason: payload.reason,
@@ -65,11 +67,14 @@ export async function polishOrbitNarrative(payload) {
     confidence_percent: payload.confidence,
     top_ranked_task: payload.orbit?.ranked?.[0] ?? null,
     sentinel: payload.sentinel ?? null,
+    session_memory_recent: recentRuns,
   })
 
   const prompt = `You are ORBIT, a student execution and foresight assistant.
 
 The JSON below was produced by deterministic rules (fixed math). You must NOT contradict recommended_action or imply a different primary task.
+
+If session_memory_recent is non-empty, you may reference it briefly to personalize tone (e.g. repeated themes)—do not invent facts not present in the JSON.
 
 Rewrite ONLY the narrative clarity of three fields for a tired, busy student: keep each field under 600 characters, concrete, and grounded in the given numbers. Do not invent new metrics.
 

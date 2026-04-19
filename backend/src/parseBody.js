@@ -1,3 +1,5 @@
+import { sanitizeMemoryRecent } from "./parseMemory.js"
+
 export class ValidationError extends Error {
   constructor(message) {
     super(message)
@@ -23,7 +25,16 @@ export function moodToEnergy(mood) {
 
 /**
  * @param {Record<string, unknown>} body
- * @returns {{ tasksRaw: string, goalsRaw: string, timeAvailableMinutes: number, energy: ReturnType<moodToEnergy> }}
+ * @returns {{
+ *   tasksRaw: string,
+ *   goalsRaw: string,
+ *   goalsShort: string,
+ *   goalsLong: string,
+ *   memoryRecent: object[],
+ *   timeAvailableMinutes: number,
+ *   energy: ReturnType<moodToEnergy>,
+ *   asOfIso: string | null,
+ * }}
  */
 export function parseGenerateBody(body) {
   if (!body || typeof body !== "object") {
@@ -31,8 +42,25 @@ export function parseGenerateBody(body) {
   }
 
   const tasksRaw = typeof body.tasks === "string" ? body.tasks : ""
-  const goalsRaw = typeof body.goals === "string" ? body.goals : ""
+  const short =
+    typeof body.shortTermGoals === "string" ? body.shortTermGoals.trim() : ""
+  const long =
+    typeof body.longTermGoals === "string" ? body.longTermGoals.trim() : ""
+  const legacy = typeof body.goals === "string" ? body.goals.trim() : ""
+
+  let goalsRaw = ""
+  if (short || long) {
+    const parts = []
+    if (short) parts.push(`Short-term: ${short}`)
+    if (long) parts.push(`Long-term: ${long}`)
+    goalsRaw = parts.join("\n")
+    if (legacy) goalsRaw += `\nContext: ${legacy}`
+  } else {
+    goalsRaw = legacy
+  }
+
   const mood = body.mood
+  const memoryRecent = sanitizeMemoryRecent(body.memory)
 
   const lines = tasksRaw
     .split(/\r?\n/)
@@ -64,6 +92,9 @@ export function parseGenerateBody(body) {
   return {
     tasksRaw,
     goalsRaw,
+    goalsShort: short,
+    goalsLong: long,
+    memoryRecent,
     timeAvailableMinutes: timeNum,
     energy: moodToEnergy(mood),
     asOfIso,

@@ -67,7 +67,7 @@ export async function generateNextAction(body) {
     action,
     steps: buildSteps(best.task),
     reason,
-    risk: formatSentinelRiskLine(sentinel),
+    risk: formatSentinelRiskLine(sentinel, parsed.memoryRecent),
     future_impact: futureImpact,
     confidence: conf,
     orbit: {
@@ -98,6 +98,9 @@ export async function generateNextAction(body) {
         mood: body.mood,
         time: body.time,
         goals: body.goals,
+        shortTermGoals: body.shortTermGoals,
+        longTermGoals: body.longTermGoals,
+        memory: { recentRuns: parsed.memoryRecent },
         asOf: body.asOf,
       },
       system: "orbit-core",

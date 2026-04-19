@@ -53,9 +53,28 @@ export function sentinelDeferSnapshot({
   }
 }
 
-export function formatSentinelRiskLine(s) {
+/** @param {object[]} [memoryRecent] */
+export function formatSentinelRiskLine(s, memoryRecent = []) {
+  const pctNow = Math.min(100, Math.max(0, Math.round(s.meanUrgencyNow * 100)))
+  const pctDefer = Math.min(
+    100,
+    Math.max(0, Math.round(s.meanUrgencyIfDeferChosen * 100)),
+  )
+  const line1 = `Backlog urgency index: ${pctNow}% now → ${pctDefer}% if you defer the top pick ${s.deferHours}h.`
+
   const pctDelta = (s.meanUrgencyDelta * 100).toFixed(1)
   const load = s.workloadRatio.toFixed(2)
   const sign = s.meanUrgencyDelta >= 0 ? "+" : ""
-  return `Deferring the top pick by ${s.deferHours}h raises mean backlog urgency by ${sign}${pctDelta} pts (index); workload vs time is ${load}×.`
+  const line2 = `Mean urgency delta: ${sign}${pctDelta} index pts; workload vs available time: ${load}×.`
+
+  let mem = ""
+  if (Array.isArray(memoryRecent) && memoryRecent.length > 0) {
+    const bits = memoryRecent.slice(0, 4).map((r, i) => {
+      const label = r.topTitle || r.action || "—"
+      return `${i + 1}) ${String(label).slice(0, 48)}`
+    })
+    mem = `\nSession memory (recent picks): ${bits.join("; ")}.`
+  }
+
+  return `${line1}\n${line2}${mem}`
 }

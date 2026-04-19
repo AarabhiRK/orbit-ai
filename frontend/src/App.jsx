@@ -5,13 +5,46 @@ const apiBase = (import.meta.env.VITE_API_URL ?? "http://localhost:5050").replac
   "",
 );
 
+const ORBIT_MEMORY_KEY = "orbit_v1_session_memory"
+
+function loadSessionMemory() {
+  try {
+    const raw = localStorage.getItem(ORBIT_MEMORY_KEY)
+    if (!raw) return { recentRuns: [] }
+    const j = JSON.parse(raw)
+    return j && Array.isArray(j.recentRuns) ? j : { recentRuns: [] }
+  } catch {
+    return { recentRuns: [] }
+  }
+}
+
+function rememberRun(data) {
+  try {
+    const prev = loadSessionMemory()
+    const runs = Array.isArray(prev.recentRuns) ? [...prev.recentRuns] : []
+    runs.unshift({
+      at: new Date().toISOString(),
+      action: data.action ?? "",
+      topTitle: data.orbit?.ranked?.[0]?.title ?? "",
+      orbitScoreTop: data.orbit?.ranked?.[0]?.orbitScore ?? null,
+    })
+    localStorage.setItem(
+      ORBIT_MEMORY_KEY,
+      JSON.stringify({ recentRuns: runs.slice(0, 8) }),
+    )
+  } catch {
+    /* ignore quota / privacy mode */
+  }
+}
+
 export default function App() {
   const [tasks, setTasks] = useState("");
   const [mood, setMood] = useState("");
   const [time, setTime] = useState("");
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [goals, setGoals] = useState("");
+  const [shortTermGoals, setShortTermGoals] = useState("");
+  const [longTermGoals, setLongTermGoals] = useState("");
 
   const generate = async () => {
   setLoading(true);
@@ -21,7 +54,14 @@ export default function App() {
     const res = await fetch(`${apiBase}/generate-next-action`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tasks, mood, time, goals }),
+      body: JSON.stringify({
+        tasks,
+        mood,
+        time,
+        shortTermGoals,
+        longTermGoals,
+        memory: loadSessionMemory(),
+      }),
     });
 
     const data = await res.json();
@@ -33,10 +73,12 @@ export default function App() {
         risk: "—",
         future_impact: "—",
         confidence: 50,
+        inputError: true,
       });
       return;
     }
     setResult(data);
+    rememberRun(data);
   } catch {
     setResult({
       action: "Backend not connected yet",
@@ -64,31 +106,49 @@ export default function App() {
         </p>
       )}
       <p style={{ fontSize: 12, color: "gray", marginBottom: 20 }}>
-        System: {!result ? "Idle" : result.confidence === 0 ? "Offline / Mock Mode" : "AI Active"}
+        System:{" "}
+        {!result
+          ? "Idle"
+          : result.inputError
+            ? "Input / validation"
+            : result.confidence === 0
+              ? "Offline / API unreachable"
+              : "ORBIT active"}
       </p>
 
       <textarea
-        placeholder="Enter tasks..."
+        placeholder="Enter tasks (one per line; optional est:90 due:2026-04-22)"
         style={{ width: "100%", padding: 10, marginBottom: 10 }}
         onChange={(e) => setTasks(e.target.value)}
+        value={tasks}
       />
 
       <textarea
-        placeholder="Enter your goals (e.g., get internship, do well in classes)"
+        placeholder="Short-term goals (this week / month)"
         style={{ width: "100%", padding: 10, marginBottom: 10 }}
-        onChange={(e) => setGoals(e.target.value)}
+        onChange={(e) => setShortTermGoals(e.target.value)}
+        value={shortTermGoals}
+      />
+
+      <textarea
+        placeholder="Long-term goals (internship, GPA, health, …)"
+        style={{ width: "100%", padding: 10, marginBottom: 10 }}
+        onChange={(e) => setLongTermGoals(e.target.value)}
+        value={longTermGoals}
       />
 
       <input
         placeholder="Mood (1-5 or text)"
         style={{ width: "100%", padding: 10, marginBottom: 10 }}
         onChange={(e) => setMood(e.target.value)}
+        value={mood}
       />
 
       <input
         placeholder="Time available (minutes)"
         style={{ width: "100%", padding: 10, marginBottom: 10 }}
         onChange={(e) => setTime(e.target.value)}
+        value={time}
       />
 
       <button
@@ -102,32 +162,61 @@ export default function App() {
           cursor: loading ? "not-allowed" : "pointer",
         }}
       >
-        {loading ? "Thinking..." : "Generate Next Action"}
+        {loading ? "ORBIT thinking…" : "Generate Next Action"}
       </button>
 
       {loading && (
-        <p style={{ marginTop: 20, fontStyle: "italic" }}>
-          ORBIT is analyzing your context...
+        <p style={{ marginTop: 20, fontStyle: "italic", color: "#555" }}>
+          ORBIT is scoring tasks and running Sentinel…
         </p>
       )}
 
       {result && (
-        <div style={{ marginTop: 30, padding: 20, border: "1px solid #ddd" }}>
+        <div style={{ marginTop: 30, padding: 20, border: "1px solid #ddd", textAlign: "left" }}>
           
-          <h2>Next Action</h2>
-          <h3 style={{ fontSize: 20, fontWeight: "bold" }} >
+          <h2 style={{ textAlign: "center", marginTop: 0 }}>Next Action</h2>
+          <h3
+            style={{
+              fontSize: 24,
+              fontWeight: 700,
+              lineHeight: 1.25,
+              margin: "12px 0 16px",
+              textAlign: "center",
+            }}
+          >
             {result.action}
           </h3>
 
-          <p><b>Reason:</b> {result.reason}</p>
+          <p style={{ margin: "12px 0" }}>
+            <b>Reason</b> <span style={{ color: "#555", fontWeight: 500 }}>(auditable)</span>
+            <br />
+            {result.reason}
+          </p>
 
-          <p><b>Risk:</b> {result.risk}</p>
+          <div
+            style={{
+              margin: "16px 0",
+              padding: "12px 14px",
+              borderLeft: "4px solid #b91c1c",
+              background: "#fef2f2",
+              color: "#1f2937",
+            }}
+          >
+            <b>Risk</b> <span style={{ color: "#991b1b" }}>(Sentinel)</span>
+            <div style={{ marginTop: 6 }}>{result.risk}</div>
+          </div>
 
-          <p><b>Future Impact:</b> {result.future_impact}</p>
+          <p style={{ margin: "14px 0", fontSize: 14, color: "#64748b", lineHeight: 1.45 }}>
+            <b style={{ color: "#475569" }}>Future impact</b>
+            <br />
+            {result.future_impact}
+          </p>
           
-          <p><b>Confidence:</b> {result.confidence}%</p>
+          <p style={{ margin: "12px 0", fontSize: 15 }}>
+            <b>Confidence</b> (top vs runner-up): {result.confidence}%
+          </p>
 
-          <h4>Steps:</h4>
+          <h4>Steps</h4>
           <ul>
             {result?.steps?.map((s, i) => (
               <li key={i}>{s}</li>
