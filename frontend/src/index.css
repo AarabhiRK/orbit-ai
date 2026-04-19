@@ -803,6 +803,78 @@ code {
   border: 1px solid var(--orbit-border-strong);
 }
 
+/* Progressive disclosure — default view stays short; judges can expand for audit. */
+.orbit-details-soft {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--orbit-radius-sm);
+  border: 1px solid var(--orbit-border);
+  background: var(--orbit-surface-2, #f8fafc);
+}
+
+.orbit-details-soft--wide {
+  margin-top: 18px;
+}
+
+.orbit-details-soft__summary {
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--orbit-text-secondary);
+  list-style: none;
+}
+
+.orbit-details-soft__summary::-webkit-details-marker {
+  display: none;
+}
+
+.orbit-details-soft__body {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--orbit-border);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.orbit-details-soft__body .orbit-risk-card {
+  margin-top: 0;
+}
+
+.orbit-risk-one-liner {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--orbit-text);
+  line-height: 1.45;
+}
+
+.orbit-run-next--prominent {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: var(--orbit-radius-sm);
+  border: 1px solid var(--orbit-brand-border, #c7d2fe);
+  background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%);
+}
+
+.orbit-run-prose-block--highlight {
+  margin-top: 4px;
+}
+
+.orbit-run-align--in-details {
+  margin: 0;
+}
+
+.orbit-run-align--in-details .orbit-run-align__text {
+  margin: 0;
+}
+
+.orbit-table-section__title {
+  margin: 12px 0 10px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
 .orbit-input-error {
   margin-top: 24px;
   padding: 16px;

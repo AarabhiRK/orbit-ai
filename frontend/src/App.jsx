@@ -259,6 +259,18 @@ function formatClock(m) {
   return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`
 }
 
+/** One-line risk for the default (simple) view — full text stays inside <details>. */
+function friendlyRiskSummary(result) {
+  const s = result?.sentinel
+  if (!s) return null
+  const lvl = String(s.riskLevel || "MEDIUM").toUpperCase()
+  const score = s.riskProbabilityScore
+  const wr = s.workloadRatio
+  const bits = [`${lvl} risk${score != null ? ` (${score}/100)` : ""}`]
+  if (wr != null && Number.isFinite(Number(wr))) bits.push(`${Number(wr).toFixed(2)}× workload vs time`)
+  return bits.join(" · ")
+}
+
 export default function App() {
   const [tasks, setTasks] = useState("")
   const [mood, setMood] = useState("")
@@ -972,24 +984,27 @@ export default function App() {
             </div>
           ) : null}
           {result.userModel?.behavior_profile ? (
-            <dl className="orbit-run-behavior-grid">
-              <div className="orbit-run-behavior-cell">
-                <dt>Completion</dt>
-                <dd>{result.userModel.behavior_profile.completion_rate_0_100 ?? "—"}%</dd>
-              </div>
-              <div className="orbit-run-behavior-cell">
-                <dt>Procrastination signal</dt>
-                <dd>{result.userModel.behavior_profile.procrastination_tendency_0_100 ?? "—"}/100</dd>
-              </div>
-              <div className="orbit-run-behavior-cell">
-                <dt>Focus stability</dt>
-                <dd>{result.userModel.behavior_profile.focus_duration_pattern_score_0_100 ?? "—"}/100</dd>
-              </div>
-              <div className="orbit-run-behavior-cell">
-                <dt>Ignored suggestions</dt>
-                <dd>{result.userModel.behavior_profile.ignored_recommendations_count ?? 0}</dd>
-              </div>
-            </dl>
+            <details className="orbit-details-soft">
+              <summary className="orbit-details-soft__summary">Habit stats (optional)</summary>
+              <dl className="orbit-run-behavior-grid">
+                <div className="orbit-run-behavior-cell">
+                  <dt>Completion</dt>
+                  <dd>{result.userModel.behavior_profile.completion_rate_0_100 ?? "—"}%</dd>
+                </div>
+                <div className="orbit-run-behavior-cell">
+                  <dt>Procrastination signal</dt>
+                  <dd>{result.userModel.behavior_profile.procrastination_tendency_0_100 ?? "—"}/100</dd>
+                </div>
+                <div className="orbit-run-behavior-cell">
+                  <dt>Focus stability</dt>
+                  <dd>{result.userModel.behavior_profile.focus_duration_pattern_score_0_100 ?? "—"}/100</dd>
+                </div>
+                <div className="orbit-run-behavior-cell">
+                  <dt>Ignored suggestions</dt>
+                  <dd>{result.userModel.behavior_profile.ignored_recommendations_count ?? 0}</dd>
+                </div>
+              </dl>
+            </details>
           ) : null}
         </section>
       )}
@@ -1037,13 +1052,14 @@ export default function App() {
             </button>
           </div>
 
-          {llmPickTitle ? (
-            <div className="orbit-run-align">
-              <span className="orbit-run-align__label">Assistant alignment</span>
-              <p className="orbit-run-align__text">
-                The narrative layer matched <strong>{llmPickTitle}</strong> as the task to emphasize among your top
-                picks.
-              </p>
+          {result.steps && result.steps.length > 0 ? (
+            <div className="orbit-run-next orbit-run-next--prominent">
+              <div className="orbit-run-section-label">Start here</div>
+              <ol className="orbit-run-next__list">
+                {result.steps.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ol>
             </div>
           ) : null}
 
@@ -1051,15 +1067,33 @@ export default function App() {
             <div className="orbit-run-section-label">Why this pick</div>
             <p className="orbit-run-prose">{result.reason}</p>
           </div>
+
+          {llmPickTitle ? (
+            <details className="orbit-details-soft">
+              <summary className="orbit-details-soft__summary">Assistant alignment (optional)</summary>
+              <div className="orbit-run-align orbit-run-align--in-details">
+                <p className="orbit-run-align__text">
+                  The narrative layer matched <strong>{llmPickTitle}</strong> as the task to emphasize among your top
+                  picks.
+                </p>
+              </div>
+            </details>
+          ) : null}
         </section>
       )}
 
       {result && !result.inputError && result.schedule && (
         <section className="orbit-schedule-section">
-          <h2>Schedule by day</h2>
+          <h2>Your plan by day</h2>
           <p className="orbit-schedule-meta">
-            Times are minute offsets in your work window (00:00 = start of the block you protect for deep work).
+            Each day lists focus blocks in order. Open technical notes only if you care how times map to minutes.
           </p>
+          <details className="orbit-details-soft">
+            <summary className="orbit-details-soft__summary">How times are shown (optional)</summary>
+            <p className="orbit-schedule-meta" style={{ marginTop: 8 }}>
+              Times are minute offsets in your work window (00:00 = start of the block you protect for deep work).
+            </p>
+          </details>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             {result.schedule.days.map((day) => (
               <div key={day.dayIndex} className="orbit-schedule-day">
@@ -1100,73 +1134,44 @@ export default function App() {
 
       {result && !result.inputError && durationPredictions.length > 0 && (
         <section className="orbit-table-section">
-          <h2>Duration agent</h2>
-          <table className="orbit-data-table">
-            <thead>
-              <tr>
-                <th>Task</th>
-                <th>Minutes</th>
-                <th>Source</th>
-              </tr>
-            </thead>
-            <tbody>
-              {durationPredictions.map((p) => (
-                <tr key={p.id}>
-                  <td>{p.title}</td>
-                  <td>{p.minutes}</td>
-                  <td className="orbit-td-muted">{p.source.replace(/_/g, " ")}</td>
+          <details className="orbit-details-soft">
+            <summary className="orbit-details-soft__summary">Time estimates per task (optional)</summary>
+            <h2 className="orbit-table-section__title">Duration agent</h2>
+            <table className="orbit-data-table">
+              <thead>
+                <tr>
+                  <th>Task</th>
+                  <th>Minutes</th>
+                  <th>Source</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {durationPredictions.map((p) => (
+                  <tr key={p.id}>
+                    <td>{p.title}</td>
+                    <td>{p.minutes}</td>
+                    <td className="orbit-td-muted">{p.source.replace(/_/g, " ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </details>
         </section>
       )}
 
       {result && !result.inputError && riskParts && (
         <div className="orbit-run-followup">
-          <section className={orbitRiskCardClass(result.sentinel?.riskLevel)}>
-            <div className="orbit-risk-card__header">
-              <span className="orbit-risk-card__title">Schedule risk</span>
-              <span className="orbit-risk-card__subtitle">Sentinel check on your top task</span>
-            </div>
-            {riskParts.coreLines.length > 0 ? (
-              <ul className="orbit-risk-card__lines">
-                {riskParts.coreLines.map((line) => (
-                  <li key={line}>{line}</li>
-                ))}
-              </ul>
-            ) : (
-              <p className="orbit-risk-card__empty">No risk summary.</p>
-            )}
-            {riskParts.tipLines.map((line) => (
-              <p key={line} className="orbit-risk-card__tip">
-                {line}
-              </p>
-            ))}
-            {riskParts.memoryLines.map((line) => (
-              <p key={line} className="orbit-risk-card__memory">
-                {line}
-              </p>
-            ))}
-            {riskParts.otherLines.length > 0 ? (
-              <div className="orbit-risk-card__others">
-                <div className="orbit-run-section-label">Other strong tasks</div>
-                <ul className="orbit-risk-card__other-list">
-                  {riskParts.otherLines.map((line) => (
-                    <li key={line}>{line}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-          </section>
+          {friendlyRiskSummary(result) ? (
+            <p className="orbit-risk-one-liner">{friendlyRiskSummary(result)}</p>
+          ) : null}
 
-          <div className="orbit-run-prose-block">
+          <div className="orbit-run-prose-block orbit-run-prose-block--highlight">
             <div className="orbit-run-section-label">If you follow through</div>
             <p className="orbit-run-prose">{result.future_impact}</p>
           </div>
 
           <div className="orbit-run-confidence">
-            <div className="orbit-run-section-label">Confidence in this suggestion</div>
+            <div className="orbit-run-section-label">Confidence</div>
             <div className="orbit-run-confidence__stats">
               <div className="orbit-run-stat-pill">
                 <span className="orbit-run-stat-pill__value">{result.confidence}%</span>
@@ -1179,59 +1184,104 @@ export default function App() {
                 </div>
               ) : null}
             </div>
-            {result.confidence_breakdown ? (
-              <div className="orbit-breakdown-box orbit-run-breakdown">
-                <div className="orbit-run-breakdown__grid">
-                  <div>
-                    <span className="orbit-run-breakdown__k">Data quality</span>
-                    <span className="orbit-run-breakdown__v">{result.confidence_breakdown.data_confidence}</span>
-                  </div>
-                  <div>
-                    <span className="orbit-run-breakdown__k">Decision stability</span>
-                    <span className="orbit-run-breakdown__v">{result.confidence_breakdown.decision_stability}</span>
-                  </div>
-                  <div>
-                    <span className="orbit-run-breakdown__k">Risk uncertainty</span>
-                    <span className="orbit-run-breakdown__v">{result.confidence_breakdown.risk_uncertainty}</span>
-                  </div>
-                </div>
-                <p className="orbit-run-breakdown__note">{result.confidence_breakdown.note}</p>
-              </div>
-            ) : null}
           </div>
 
-          {result.alternatives && result.alternatives.length > 0 ? (
-            <div className="orbit-run-alt-section">
-              <div className="orbit-run-section-label">Solid runners-up</div>
-              <ul className="orbit-run-alt-grid">
-                {result.alternatives.map((a) => (
-                  <li key={a.id} className="orbit-run-alt-card">
-                    <div className="orbit-run-alt-card__head">
-                      <span className="orbit-run-alt-card__title">{a.title}</span>
-                      <span className="orbit-run-alt-card__badge">{formatOrbitScoreShort(a.orbitScore)}</span>
-                    </div>
-                    <p className="orbit-run-alt-card__meta">{a.one_line}</p>
-                  </li>
+          <details className="orbit-details-soft orbit-details-soft--wide">
+            <summary className="orbit-details-soft__summary">
+              Risk details, runners-up, scores &amp; tradeoffs (optional)
+            </summary>
+            <div className="orbit-details-soft__body">
+              <section className={orbitRiskCardClass(result.sentinel?.riskLevel)}>
+                <div className="orbit-risk-card__header">
+                  <span className="orbit-risk-card__title">Schedule risk</span>
+                  <span className="orbit-risk-card__subtitle">Sentinel check on your top task</span>
+                </div>
+                {riskParts.coreLines.length > 0 ? (
+                  <ul className="orbit-risk-card__lines">
+                    {riskParts.coreLines.map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="orbit-risk-card__empty">No risk summary.</p>
+                )}
+                {riskParts.tipLines.map((line) => (
+                  <p key={line} className="orbit-risk-card__tip">
+                    {line}
+                  </p>
                 ))}
-              </ul>
-            </div>
-          ) : null}
+                {riskParts.memoryLines.map((line) => (
+                  <p key={line} className="orbit-risk-card__memory">
+                    {line}
+                  </p>
+                ))}
+                {riskParts.otherLines.length > 0 ? (
+                  <div className="orbit-risk-card__others">
+                    <div className="orbit-run-section-label">Other strong tasks</div>
+                    <ul className="orbit-risk-card__other-list">
+                      {riskParts.otherLines.map((line) => (
+                        <li key={line}>{line}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </section>
 
-          {result.tradeoffs ? (
-            <div className="orbit-run-prose-block">
-              <div className="orbit-run-section-label">Tradeoffs</div>
-              <p className="orbit-run-prose">{result.tradeoffs}</p>
-            </div>
-          ) : null}
+              {result.confidence_breakdown ? (
+                <div className="orbit-breakdown-box orbit-run-breakdown">
+                  <div className="orbit-run-section-label">How confidence is built</div>
+                  <div className="orbit-run-breakdown__grid">
+                    <div>
+                      <span className="orbit-run-breakdown__k">Data quality</span>
+                      <span className="orbit-run-breakdown__v">{result.confidence_breakdown.data_confidence}</span>
+                    </div>
+                    <div>
+                      <span className="orbit-run-breakdown__k">Decision stability</span>
+                      <span className="orbit-run-breakdown__v">{result.confidence_breakdown.decision_stability}</span>
+                    </div>
+                    <div>
+                      <span className="orbit-run-breakdown__k">Risk uncertainty</span>
+                      <span className="orbit-run-breakdown__v">{result.confidence_breakdown.risk_uncertainty}</span>
+                    </div>
+                  </div>
+                  <p className="orbit-run-breakdown__note">{result.confidence_breakdown.note}</p>
+                </div>
+              ) : null}
 
-          {result.schedule?.discarded_from_packing?.length > 0 && (
-            <div className="orbit-banner-yellow">
-              <b>Auto-discarded from packing</b> (still in full rank list):{" "}
-              {result.schedule.discarded_from_packing
-                .map((d) => `${d.title} (${d.orbitScore?.toFixed?.(3) ?? d.orbitScore})`)
-                .join("; ")}
+              {result.alternatives && result.alternatives.length > 0 ? (
+                <div className="orbit-run-alt-section">
+                  <div className="orbit-run-section-label">Solid runners-up</div>
+                  <ul className="orbit-run-alt-grid">
+                    {result.alternatives.map((a) => (
+                      <li key={a.id} className="orbit-run-alt-card">
+                        <div className="orbit-run-alt-card__head">
+                          <span className="orbit-run-alt-card__title">{a.title}</span>
+                          <span className="orbit-run-alt-card__badge">{formatOrbitScoreShort(a.orbitScore)}</span>
+                        </div>
+                        <p className="orbit-run-alt-card__meta">{a.one_line}</p>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {result.tradeoffs ? (
+                <div className="orbit-run-prose-block">
+                  <div className="orbit-run-section-label">Tradeoffs</div>
+                  <p className="orbit-run-prose">{result.tradeoffs}</p>
+                </div>
+              ) : null}
+
+              {result.schedule?.discarded_from_packing?.length > 0 && (
+                <div className="orbit-banner-yellow">
+                  <b>Auto-discarded from packing</b> (still in full rank list):{" "}
+                  {result.schedule.discarded_from_packing
+                    .map((d) => `${d.title} (${d.orbitScore?.toFixed?.(3) ?? d.orbitScore})`)
+                    .join("; ")}
+                </div>
+              )}
             </div>
-          )}
+          </details>
 
           <div className="orbit-feedback-card orbit-run-feedback">
             <div className="orbit-run-section-label">Quick feedback</div>
@@ -1269,17 +1319,6 @@ export default function App() {
             </div>
             {feedbackNote ? <p className="orbit-feedback-note">{feedbackNote}</p> : null}
           </div>
-
-          {result.steps && result.steps.length > 0 ? (
-            <div className="orbit-run-next">
-              <div className="orbit-run-section-label">Concrete next moves</div>
-              <ol className="orbit-run-next__list">
-                {result.steps.map((s, i) => (
-                  <li key={i}>{s}</li>
-                ))}
-              </ol>
-            </div>
-          ) : null}
         </div>
       )}
 
