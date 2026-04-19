@@ -1,9 +1,0 @@
-{
-  "name": "orbit-backend",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
-  "scripts": {
-    "step0": "node src/step0_printScenario.js"
-  }
-}
