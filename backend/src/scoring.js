@@ -43,24 +43,56 @@ export function feasibilityForTask(task, timeAvailableMinutes, energy) {
   return clamp(effectiveMinutes / est, 0, 1)
 }
 
-export function orbitScore(urgency, goalAlignment, feasibility) {
+/**
+ * “Risk reduction” — doing this task now lowers exposure when it is urgent and/or
+ * it clears a meaningful share of an overloaded backlog (transparent heuristic).
+ */
+export function riskReductionForTask(task, asOfIso, tasks, timeAvailableMinutes) {
+  const u = urgencyForTask(task, asOfIso)
+  const totalEst = tasks.reduce(
+    (s, t) => s + Math.max(1, Math.round(Number(t.estimatedMinutes) || 1)),
+    0,
+  )
+  const myEst = Math.max(1, Math.round(Number(task.estimatedMinutes) || 1))
+  const share = myEst / Math.max(1, totalEst)
+  const backlogPressure = clamp(totalEst / Math.max(30, timeAvailableMinutes), 0, 3) / 3
+  const relief = share * (0.45 + 0.55 * backlogPressure)
+  return clamp(0.55 * u + 0.45 * relief, 0, 1)
+}
+
+export function orbitScore(urgency, goalAlignment, feasibility, riskReduction, w = ORBIT_WEIGHTS) {
   return (
-    ORBIT_WEIGHTS.urgency * urgency +
-    ORBIT_WEIGHTS.goalAlignment * goalAlignment +
-    ORBIT_WEIGHTS.feasibility * feasibility
+    w.urgency * urgency +
+    w.goalAlignment * goalAlignment +
+    w.feasibility * feasibility +
+    w.riskReduction * riskReduction
   )
 }
 
 /**
- * @returns {{ task: object, urgency: number, goalAlignment: number, feasibility: number, orbitScore: number }[]}
+ * @returns {{ task: object, urgency: number, goalAlignment: number, feasibility: number, riskReduction: number, orbitScore: number }[]}
  */
-export function scoreTasks(tasks, { asOfIso, goalsRaw, timeAvailableMinutes, energy }) {
+export function scoreTasks(tasks, { asOfIso, goalsRaw, timeAvailableMinutes, energy, weights }) {
+  const w = weights ?? ORBIT_WEIGHTS
   const rows = tasks.map((task) => {
     const urgency = urgencyForTask(task, asOfIso)
     const goalAlignment = goalAlignmentForTask(task, goalsRaw)
     const feasibility = feasibilityForTask(task, timeAvailableMinutes, energy)
-    const score = orbitScore(urgency, goalAlignment, feasibility)
-    return { task, urgency, goalAlignment, feasibility, orbitScore: score }
+    const riskReduction = riskReductionForTask(
+      task,
+      asOfIso,
+      tasks,
+      timeAvailableMinutes,
+    )
+    const score = orbitScore(urgency, goalAlignment, feasibility, riskReduction, w)
+    return {
+      task,
+      urgency,
+      goalAlignment,
+      feasibility,
+      riskReduction,
+      orbitScore: score,
+    }
   })
 
   rows.sort((a, b) => {
@@ -74,6 +106,56 @@ export function scoreTasks(tasks, { asOfIso, goalsRaw, timeAvailableMinutes, ene
 export function confidencePercent(top, second) {
   const margin = top.orbitScore - (second?.orbitScore ?? 0)
   const raw = 0.55 + margin * 4.2
-  const pct = Math.round(clamp(raw, 0.52, 0.97) * 100)
-  return pct
+  return Math.round(clamp(raw, 0.52, 0.97) * 100)
+}
+
+/**
+ * @param {"LOW"|"MEDIUM"|"HIGH"} sentinelRiskLevel
+ */
+export function confidenceBreakdown(top, second, ctx) {
+  const margin = top.orbitScore - (second?.orbitScore ?? 0)
+  const decisionStability = clamp(0.38 + margin * 6.5, 0, 1)
+  const dataConfidence = clamp(
+    0.32 + 0.38 * ctx.estProvidedRatio + 0.3 * ctx.datedRatio,
+    0,
+    1,
+  )
+  let riskUncertainty = 0.72
+  if (ctx.sentinelRiskLevel === "HIGH") riskUncertainty = 0.42
+  else if (ctx.sentinelRiskLevel === "MEDIUM") riskUncertainty = 0.58
+  else if (ctx.sentinelRiskLevel === "LOW") riskUncertainty = 0.82
+
+  const blend =
+    0.34 * dataConfidence + 0.44 * decisionStability + 0.22 * riskUncertainty
+  const composite_percent = Math.round(clamp(blend, 0.52, 0.97) * 100)
+  return {
+    data_confidence: Math.round(dataConfidence * 1000) / 1000,
+    decision_stability: Math.round(decisionStability * 1000) / 1000,
+    risk_uncertainty: Math.round(riskUncertainty * 1000) / 1000,
+    composite_percent,
+    headline_margin_percent: confidencePercent(top, second),
+  }
+}
+
+/**
+ * Drop very low-priority tails before packing (still returned in `discarded` for audit).
+ */
+export function partitionScheduleRows(rows) {
+  if (rows.length === 0) return { eligible: [], discarded: [] }
+  const top = rows[0].orbitScore
+  const floor = Math.max(0.1, top * 0.4)
+  const eligible = []
+  const discarded = []
+  for (const r of rows) {
+    if (r.orbitScore >= floor) eligible.push(r)
+    else
+      discarded.push({
+        id: r.task.id,
+        title: r.task.title,
+        orbitScore: r.orbitScore,
+        floor,
+      })
+  }
+  if (eligible.length === 0) eligible.push(rows[0])
+  return { eligible, discarded }
 }

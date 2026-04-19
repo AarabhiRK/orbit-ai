@@ -52,11 +52,13 @@ export function taskStringsFromRaw(tasksRaw) {
  * One task per line. Optional hints (stripped from title):
  *   due:2026-04-20  or  due:2026-04-20T23:59:00Z
  *   est:90   or   90min
+ *   after:task_0  — soft ordering hint for scheduler
  */
 export function parseTaskLine(raw, index) {
   let line = String(raw).trim()
   let dueAt = null
   let estimatedMinutes = 60
+  let estProvided = false
 
   const dueMatch = line.match(/\bdue:\s*([^\s|]+)/i)
   if (dueMatch) {
@@ -65,11 +67,19 @@ export function parseTaskLine(raw, index) {
     line = line.replace(dueMatch[0], " ").trim()
   }
 
+  let dependsOn = null
+  const afterMatch = line.match(/\bafter:\s*(task_\d+)\b/i)
+  if (afterMatch) {
+    dependsOn = afterMatch[1].toLowerCase()
+    line = line.replace(afterMatch[0], " ").trim()
+  }
+
   const estColon = line.match(/\best:\s*(\d+)/i)
   const estMinWord = line.match(/\b(\d+)\s*min(?:utes)?\b/i)
   const estMatch = estColon ?? estMinWord
   if (estMatch) {
     estimatedMinutes = Math.max(1, Number.parseInt(estMatch[1], 10))
+    estProvided = true
     line = line.replace(estMatch[0], " ").trim()
   }
 
@@ -86,6 +96,10 @@ export function parseTaskLine(raw, index) {
     title,
     dueAt,
     estimatedMinutes,
+    /** True when user gave est: or Nmin on the line (otherwise duration agent may predict). */
+    estProvided,
+    /** Optional blocking hint: `after:task_0` means start after that task id. */
+    dependsOn,
   }
 }
 
