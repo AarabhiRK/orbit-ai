@@ -3,6 +3,7 @@ import { normalizeTasksFromLines } from "./normalizeTasks.js"
 import { ORBIT_WEIGHTS } from "./constants.js"
 import { confidencePercent, scoreTasks } from "./scoring.js"
 import { formatSentinelRiskLine, sentinelDeferSnapshot } from "./sentinel.js"
+import { polishOrbitNarrative } from "./geminiNarrative.js"
 
 function round4(n) {
   return Math.round(n * 10_000) / 10_000
@@ -21,7 +22,7 @@ function buildSteps(task) {
 /**
  * @param {Record<string, unknown>} body
  */
-export function generateNextAction(body) {
+export async function generateNextAction(body) {
   const parsed = parseGenerateBody(body)
   const lines = parsed.tasksRaw
     .split(/\r?\n/)
@@ -62,7 +63,7 @@ export function generateNextAction(body) {
       ? `Clearing this now reduces pressure vs a ${sentinel.workloadRatio.toFixed(2)}× workload-to-time stack.`
       : `Completing this now keeps slack above a ${(1 / Math.max(sentinel.workloadRatio, 0.01)).toFixed(2)}× buffer vs total estimates.`
 
-  return {
+  const payload = {
     action,
     steps: buildSteps(best.task),
     reason,
@@ -102,4 +103,28 @@ export function generateNextAction(body) {
       system: "orbit-core",
     },
   }
+
+  if (process.env.GEMINI_API_KEY?.trim()) {
+    const polished = await polishOrbitNarrative(payload)
+    payload.debug = {
+      ...payload.debug,
+      narrative_source: polished ? "gemini" : "orbit-core",
+      llm: polished
+        ? { provider: "gemini", model: polished.modelId, ok: true }
+        : {
+            provider: "gemini",
+            ok: false,
+            fallback: "orbit-core",
+            note: "timeout_parse_empty_or_api_error",
+          },
+    }
+    if (polished) {
+      payload.reason = polished.reason
+      payload.risk = polished.risk
+      payload.future_impact = polished.future_impact
+    }
+    // if !polished: reason / risk / future_impact stay the deterministic strings above
+  }
+
+  return payload
 }

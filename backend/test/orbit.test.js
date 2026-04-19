@@ -18,7 +18,7 @@ test("parseTaskLine extracts due and est", () => {
   assert.match(t.title, /CS178 PSet/)
 })
 
-test("generateNextAction ranks nearer deadline higher (fixed asOf)", () => {
+test("generateNextAction ranks nearer deadline higher (fixed asOf)", async () => {
   const body = {
     asOf: "2026-04-18T12:00:00.000Z",
     tasks: [
@@ -31,7 +31,7 @@ test("generateNextAction ranks nearer deadline higher (fixed asOf)", () => {
     mood: "low",
   }
 
-  const out = generateNextAction(body)
+  const out = await generateNextAction(body)
   assert.match(out.action, /CS178/)
   assert.equal(out.orbit.ranked[0].id, "task_1")
   assert.equal(out.orbit.ranked[0].title.toLowerCase().includes("cs178"), true)

@@ -1,5 +1,10 @@
 import { useState } from "react";
 
+const apiBase = (import.meta.env.VITE_API_URL ?? "http://localhost:5050").replace(
+  /\/$/,
+  "",
+);
+
 export default function App() {
   const [tasks, setTasks] = useState("");
   const [mood, setMood] = useState("");
@@ -13,7 +18,7 @@ export default function App() {
   setResult(null);
 
   try {
-    const res = await fetch("http://localhost:5000/generate-next-action", {
+    const res = await fetch(`${apiBase}/generate-next-action`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ tasks, mood, time, goals }),
@@ -51,6 +56,13 @@ export default function App() {
       
       <h1 style={{ fontSize: 32, fontWeight: "bold" }}>ORBIT AI</h1>
       <p style={{ marginBottom: 20 }}>Your execution agent</p>
+      {import.meta.env.DEV && (
+        <p style={{ fontSize: 12, color: "#888", marginBottom: 16 }}>
+          Dev: open this app from the Vite URL (usually{" "}
+          <code style={{ fontSize: 11 }}>http://localhost:5173</code>
+          ). API base: <code style={{ fontSize: 11 }}>{apiBase}</code>
+        </p>
+      )}
       <p style={{ fontSize: 12, color: "gray", marginBottom: 20 }}>
         System: {!result ? "Idle" : result.confidence === 0 ? "Offline / Mock Mode" : "AI Active"}
       </p>
