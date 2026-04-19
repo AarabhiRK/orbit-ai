@@ -86,18 +86,24 @@ export async function polishOrbitNarrative(payload) {
   })
 
   const recentRuns = payload.debug?.received?.memory?.recentRuns ?? []
+  const recv = payload.debug?.received ?? {}
   const top3 =
     payload.candidates_top_3 ?? payload.orbit?.ranked?.slice(0, 3) ?? []
   const candidateIds = top3.map((t) => t.id).filter(Boolean)
 
   const brief = JSON.stringify({
     recommended_action: payload.action,
+    user_short_term_goals:
+      typeof recv.shortTermGoals === "string" ? recv.shortTermGoals : "",
+    user_long_term_goals:
+      typeof recv.longTermGoals === "string" ? recv.longTermGoals : "",
     deterministic_reason: payload.reason,
     deterministic_risk: payload.risk,
     deterministic_future_impact: payload.future_impact,
     confidence_percent: payload.confidence,
     confidence_breakdown: payload.confidence_breakdown ?? null,
     top_ranked_task: payload.orbit?.ranked?.[0] ?? null,
+    ranked_tasks: payload.orbit?.ranked ?? [],
     candidates_top_3: top3,
     candidate_ids_allowed: candidateIds,
     alternatives: payload.alternatives ?? [],
@@ -110,21 +116,21 @@ export async function polishOrbitNarrative(payload) {
 
   const prompt = `You are ORBIT's narrative layer for a personal life dashboard: one place where a student (or busy builder) sees goals, energy, time budget, ranked tasks, schedule blocks, and risk-style signals—explained in plain language.
 
-The JSON below was produced by deterministic ORBIT Core (fixed math + rules). candidate_ids_allowed lists the ONLY task ids you may select as primary focus.
+The JSON below was produced by deterministic ORBIT Core (fixed math + rules). Treat those facts as ground truth.
 
-You MUST output selected_task_id as EXACTLY one of candidate_ids_allowed, OR null to keep the default (#1 in candidates_top_3). Never pick a task outside that list.
+Strict rules:
+- You MUST NOT contradict recommended_action or imply a different primary task for *right now*. Do not name a runner-up as the thing to do now; use tradeoffs only to compare #1 vs #2 vs #3.
+- candidate_ids_allowed lists the ONLY task ids you may output as selected_task_id. Output selected_task_id as EXACTLY one of those ids, OR null to keep the default (#1 in candidates_top_3). Never pick outside that list.
+- When user_short_term_goals / user_long_term_goals are non-empty, tie reason and future_impact to them only where it honestly fits the ranked task and scores—no empty cheerleading.
+- If session_memory_recent or behavior_profile is non-empty, reference briefly for tone—never invent events not implied by the JSON.
+- Mirror urgency / goal-fit / workload using language already implied by deterministic_reason, deterministic_risk, and deterministic_future_impact—do not invent new percentages or metrics not present in the JSON.
+- Keep reason and future_impact under 650 characters each; tradeoffs 140–550 characters.
 
-Use candidates_top_3 and alternatives for tradeoff analysis only.
-
-If session_memory_recent or behavior_profile is non-empty, reference briefly—do not invent facts.
-
-Tone: supportive, concrete, and dashboard-clear (short paragraphs the user can scan).
-
-Fields:
-- reason: concise why the selected (or default) primary focus makes sense for their day and goals (under 650 chars).
-- future_impact: concrete next 24–72h story grounded in the numbers in the JSON (under 650 chars).
-- tradeoffs: 140–550 chars comparing #1 vs #2 vs #3 on urgency/goal/feasibility/risk scores in the JSON.
-- selected_task_id: string id from candidate_ids_allowed, or null.
+Fields (output shape is fixed):
+- reason: why this ONE primary focus now (deadline pressure, fit to goals, time/mood realism).
+- future_impact: next 24–72h upside of acting vs letting the stack compound.
+- tradeoffs: compare #1 vs #2 vs #3 on urgency/goal/feasibility/risk-style scores from the JSON.
+- selected_task_id: one of candidate_ids_allowed, or null.
 
 Output ONLY valid JSON (no markdown fences):
 {"reason":"...","future_impact":"...","tradeoffs":"...","selected_task_id":"task_0"}
