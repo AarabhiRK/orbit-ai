@@ -31,7 +31,7 @@ app.get("/health", (_req, res) => {
     service: "orbit-backend",
     system: "ORBIT AI backend online",
     gemini_configured: geminiConfigured,
-    gemini_required_for_orbit_routes: true,
+    gemini_required_for_orbit_routes: false,
     supabase_configured: isSupabaseConfigured(),
     supabase_env: getSupabaseEnvDebug(),
   })

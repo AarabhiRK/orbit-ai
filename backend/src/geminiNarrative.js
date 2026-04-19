@@ -174,7 +174,14 @@ export async function polishOrbitNarrative(payload) {
 
   const apiKey = process.env.GEMINI_API_KEY?.trim()
   if (!apiKey) {
-    throw new GeminiConfigurationError()
+    return {
+      reason: String(payload.reason ?? "").slice(0, 2000),
+      future_impact: String(payload.future_impact ?? "").slice(0, 2000),
+      tradeoffs: String(payload.tradeoffs ?? "").trim().slice(0, 1500),
+      selected_task_id: null,
+      modelId: "deterministic-fallback",
+      _llmNotes: "no GEMINI_API_KEY",
+    }
   }
 
   const modelCandidates = getGeminiModelCandidates()
