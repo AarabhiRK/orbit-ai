@@ -8,6 +8,7 @@ export default function LongTermGoalsPanel({
   setCalendar,
   shortTermGoals,
   apiBase,
+  accessToken,
   tasks,
   setTasks,
 }) {
@@ -43,9 +44,11 @@ export default function LongTermGoalsPanel({
     setPlanError("")
     setPlanningId(goalRow.id)
     try {
+      const headers = { "Content-Type": "application/json" }
+      if (accessToken) headers.Authorization = `Bearer ${accessToken}`
       const res = await fetch(`${apiBase}/plan-long-term-steps`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           goal: goalRow.text,
           shortTermContext: shortTermGoals?.trim() ?? "",
@@ -56,12 +59,24 @@ export default function LongTermGoalsPanel({
         setPlanError(data.error ?? `Planner error (${res.status})`)
         return
       }
-      const steps = (data.steps ?? []).map((s) => ({
-        id: newId("st"),
-        title: s.title,
-        dayOffset: s.dayOffset ?? 0,
-        done: false,
-      }))
+      const raw = Array.isArray(data.steps) ? data.steps : []
+      const steps = raw
+        .filter((s) => s && String(s.title ?? "").trim().length >= 3)
+        .map((s) => {
+          const off = Number(s.dayOffset)
+          return {
+            id: newId("st"),
+            title: String(s.title).trim().slice(0, 200),
+            dayOffset: Number.isFinite(off) ? Math.min(13, Math.max(0, Math.round(off))) : 0,
+            done: false,
+          }
+        })
+      if (steps.length < 4) {
+        setPlanError(
+          `Planner returned too few steps (${steps.length}; need at least 4). Try "Plan steps" again.`,
+        )
+        return
+      }
       const next = goals.map((g) => (g.id === goalRow.id ? { ...g, steps } : g))
       persistGoals(next)
     } catch {
@@ -107,41 +122,26 @@ export default function LongTermGoalsPanel({
   }
 
   return (
-    <div
-      style={{
-        padding: 20,
-        borderRadius: 14,
-        border: "1px solid #e2e8f0",
-        background: "linear-gradient(180deg, #fafbff 0%, #fff 40%)",
-      }}
-    >
-      <h2 style={{ margin: "0 0 6px", fontSize: 20, color: "#0f172a" }}>Long-term goals</h2>
-      <p style={{ margin: "0 0 16px", fontSize: 13, color: "#64748b", lineHeight: 1.5 }}>
-        Add ambitions here — ORBIT uses them in scoring. Ask Gemini for a step ladder, drop steps onto the
-        calendar, or append unchecked steps as task lines for the next run.
+    <div className="orbit-panel orbit-panel--soft">
+      <h2 style={{ margin: "0 0 6px", fontSize: 20 }}>Long-term goals</h2>
+      <p className="orbit-muted-label" style={{ margin: "0 0 16px", lineHeight: 1.5 }}>
+        Add ambitions here — ORBIT uses them in scoring. Use <strong>Plan steps</strong> for a suggested
+        ladder, drop steps onto the calendar, or append unchecked steps as task lines for the next run.
       </p>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+      <div className="orbit-lt-flex-row">
         <input
+          className="orbit-field"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           placeholder="New goal (e.g. Ship portfolio site)"
           maxLength={200}
-          style={{ flex: "1 1 220px", padding: 10, borderRadius: 8, border: "1px solid #cbd5e1" }}
         />
         <button
           type="button"
+          className="orbit-btn orbit-btn--primary orbit-btn--compact"
           onClick={addGoal}
           disabled={!draft.trim()}
-          style={{
-            padding: "10px 16px",
-            borderRadius: 8,
-            border: "none",
-            background: "#312e81",
-            color: "#fff",
-            fontWeight: 600,
-            cursor: draft.trim() ? "pointer" : "not-allowed",
-          }}
         >
           Save goal
         </button>
@@ -156,15 +156,7 @@ export default function LongTermGoalsPanel({
           <p style={{ color: "#94a3b8", fontSize: 14 }}>No long-term goals yet — add one above.</p>
         )}
         {goals.map((g) => (
-          <div
-            key={g.id}
-            style={{
-              padding: 14,
-              borderRadius: 12,
-              border: "1px solid #e2e8f0",
-              background: "#fff",
-            }}
-          >
+          <div key={g.id} className="orbit-lt-goal">
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "start" }}>
               <div>
                 <div style={{ fontWeight: 700, color: "#1e293b" }}>{g.text}</div>
@@ -172,60 +164,33 @@ export default function LongTermGoalsPanel({
                   since {new Date(g.createdAt).toLocaleDateString()}
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => removeGoal(g.id)}
-                style={{ fontSize: 12, color: "#64748b", border: "none", background: "transparent", cursor: "pointer" }}
-              >
+              <button type="button" className="orbit-link-btn" onClick={() => removeGoal(g.id)}>
                 Remove
               </button>
             </div>
             <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 8 }}>
               <button
                 type="button"
+                className="orbit-btn--outline orbit-btn--outline-indigo"
                 onClick={() => planSteps(g)}
                 disabled={planningId === g.id}
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: 8,
-                  border: "1px solid #6366f1",
-                  background: "#eef2ff",
-                  fontWeight: 600,
-                  fontSize: 13,
-                  cursor: planningId === g.id ? "wait" : "pointer",
-                }}
+                style={{ cursor: planningId === g.id ? "wait" : "pointer" }}
               >
                 {planningId === g.id ? "Planning…" : "Plan steps (Gemini)"}
               </button>
               <button
                 type="button"
+                className="orbit-btn--outline orbit-btn--outline-sky"
                 onClick={() => addStepsToCalendar(g)}
                 disabled={!g.steps?.length}
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: 8,
-                  border: "1px solid #0ea5e9",
-                  background: "#f0f9ff",
-                  fontWeight: 600,
-                  fontSize: 13,
-                  cursor: g.steps?.length ? "pointer" : "not-allowed",
-                }}
               >
                 Add steps to calendar
               </button>
               <button
                 type="button"
+                className="orbit-btn--outline orbit-btn--outline-emerald"
                 onClick={() => appendStepsToTasks(g)}
                 disabled={!g.steps?.length}
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: 8,
-                  border: "1px solid #059669",
-                  background: "#ecfdf5",
-                  fontWeight: 600,
-                  fontSize: 13,
-                  cursor: g.steps?.length ? "pointer" : "not-allowed",
-                }}
               >
                 Append to task list
               </button>

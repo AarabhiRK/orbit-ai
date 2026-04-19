@@ -1,5 +1,4 @@
-// Load backend/.env before anything else reads process.env (including GEMINI_API_KEY).
-import "dotenv/config"
+import "./loadEnv.js"
 import express from "express"
 import cors from "cors"
 import { ValidationError } from "./src/parseBody.js"
@@ -10,6 +9,8 @@ import {
 import { generateNextAction } from "./src/generateNextAction.js"
 import { generateSchedule } from "./src/generateSchedule.js"
 import { handlePlanLongTermSteps } from "./src/planLongTermRoute.js"
+import { getSupabaseEnvDebug, isSupabaseConfigured } from "./src/authSupabase.js"
+import { registerMeRoutes } from "./src/meRoutes.js"
 
 const app = express()
 app.use(cors())
@@ -31,8 +32,14 @@ app.get("/health", (_req, res) => {
     system: "ORBIT AI backend online",
     gemini_configured: geminiConfigured,
     gemini_required_for_orbit_routes: true,
+    supabase_configured: isSupabaseConfigured(),
+    supabase_env: getSupabaseEnvDebug(),
   })
 })
+
+if (isSupabaseConfigured()) {
+  registerMeRoutes(app)
+}
 
 function handleOrbitError(res, err) {
   if (err instanceof ValidationError) {

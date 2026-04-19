@@ -165,10 +165,18 @@ export async function generateNextAction(body) {
   }
 
   const polished = await polishOrbitNarrative(payload)
+  const usedGemini = polished.modelId !== "deterministic-fallback"
   payload.debug = {
     ...payload.debug,
-    narrative_source: "gemini",
-    llm: { provider: "gemini", model: polished.modelId, ok: true },
+    narrative_source: usedGemini ? "gemini" : "deterministic_fallback",
+    llm: usedGemini
+      ? { provider: "gemini", model: polished.modelId, ok: true }
+      : {
+          provider: "gemini",
+          model: polished.modelId,
+          ok: false,
+          error: polished._llmNotes ?? "narrative_unavailable",
+        },
   }
   payload.reason = polished.reason
   payload.future_impact = polished.future_impact

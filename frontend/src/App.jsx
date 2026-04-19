@@ -1,25 +1,53 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import LoginOverlay from "./components/LoginOverlay.jsx"
 import LongTermGoalsPanel from "./components/LongTermGoalsPanel.jsx"
 import CalendarMonth from "./components/CalendarMonth.jsx"
 import {
   appendCalendarTasks,
   collectUncheckedCalendarTaskLines,
-  exportMemoryBundle,
   loadCalendar,
   loadLongTermGoals,
   loadProfile,
   longTermGoalsToApiLine,
   saveCalendar,
+  saveLastAuthEmail,
+  saveLongTermGoals,
   saveProfile,
-  touchVisitStreak,
   ymdFromDate,
 } from "./lib/orbitLocalStore.js"
+import { getSupabase, isSupabaseClientConfigured } from "./lib/supabaseClient.js"
 
 const apiBase = (import.meta.env.VITE_API_URL ?? "http://localhost:5050").replace(
   /\/$/,
   "",
 )
+
+function isBrowserNetworkError(err) {
+  const msg = String(err?.message ?? err)
+  return (
+    msg === "Failed to fetch" ||
+    msg === "Load failed" ||
+    (err?.name === "TypeError" && /fetch|network/i.test(msg))
+  )
+}
+
+/** ORBIT API on `apiBase` — turns the browser's vague "Failed to fetch" into an actionable message. */
+async function backendFetch(path, init) {
+  const p = path.startsWith("/") ? path : `/${path}`
+  const url = `${apiBase}${p}`
+  try {
+    return await fetch(url, init)
+  } catch (err) {
+    if (isBrowserNetworkError(err)) {
+      throw new Error(
+        `Cannot reach ORBIT backend at ${apiBase} (browser: "Failed to fetch"). ` +
+          `Start the API: cd backend && npm start (default port 5050). ` +
+          `If you use another port, set VITE_API_URL in frontend/.env.development.local to match, then restart the Vite dev server.`,
+      )
+    }
+    throw err instanceof Error ? err : new Error(String(err))
+  }
+}
 
 const ORBIT_MEMORY_KEY = "orbit_v1_session_memory"
 const ORBIT_BEHAVIOR_KEY = "orbit_v1_behavior_outcomes"
@@ -175,25 +203,60 @@ function rememberScheduleRun(data) {
   }
 }
 
+const ORBIT_OTHER_CANDIDATES_RISK_MARKER =
+  "\n\n--- Other top candidates (if not done) ---\n"
+
+/** @param {string | undefined} risk */
+function splitRiskForDisplay(risk) {
+  if (!risk || risk === "—") {
+    return { coreLines: [], tipLines: [], memoryLines: [], otherLines: [] }
+  }
+  const idx = risk.indexOf(ORBIT_OTHER_CANDIDATES_RISK_MARKER)
+  const main =
+    idx === -1 ? risk : risk.slice(0, idx)
+  const tail =
+    idx === -1 ? "" : risk.slice(idx + ORBIT_OTHER_CANDIDATES_RISK_MARKER.length)
+  const mainLines = main.split("\n").map((l) => l.trim()).filter(Boolean)
+  const coreLines = []
+  const tipLines = []
+  const memoryLines = []
+  for (const line of mainLines) {
+    if (line.startsWith("Tip:")) tipLines.push(line)
+    else if (line.startsWith("Session memory")) memoryLines.push(line)
+    else coreLines.push(line)
+  }
+  const otherLines = tail
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+  return { coreLines, tipLines, memoryLines, otherLines }
+}
+
+/** @param {Record<string, unknown> | null} result @param {string | null | undefined} taskId */
+function taskTitleForId(result, taskId) {
+  if (!taskId || !result?.orbit?.ranked) return null
+  const row = result.orbit.ranked.find((r) => r.id === taskId)
+  return row?.title ?? null
+}
+
+/** @param {unknown} n */
+function formatOrbitScoreShort(n) {
+  if (n == null || Number.isNaN(Number(n))) return "—"
+  return Number(n).toFixed(2)
+}
+
+/** @param {string | undefined} level */
+function orbitRiskCardClass(level) {
+  const u = String(level || "").toUpperCase()
+  if (u === "LOW") return "orbit-risk-card orbit-risk-card--low"
+  if (u === "HIGH" || u === "CRITICAL") return "orbit-risk-card"
+  return "orbit-risk-card orbit-risk-card--mid"
+}
+
 function formatClock(m) {
   const h = Math.floor(m / 60)
   const min = m % 60
   return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`
-}
-
-function initialProfile() {
-  const p = loadProfile()
-  if (!p.displayName) return p
-  const n = touchVisitStreak(p)
-  if (
-    n.lastVisitYmd !== p.lastVisitYmd ||
-    n.currentStreak !== p.currentStreak ||
-    n.longestStreak !== p.longestStreak
-  ) {
-    saveProfile(n)
-    return n
-  }
-  return p
 }
 
 export default function App() {
@@ -208,34 +271,303 @@ export default function App() {
   const [feedbackNote, setFeedbackNote] = useState("")
   const [mode, setMode] = useState("next_action")
   const [hours, setHours] = useState("")
-  const [profile, setProfile] = useState(initialProfile)
+  const [profile, setProfile] = useState(loadProfile)
   const [goalRows, setGoalRows] = useState(loadLongTermGoals)
   const [calendar, setCalendar] = useState(loadCalendar)
   const [lifeTab, setLifeTab] = useState("run")
+  const [accessToken, setAccessToken] = useState(null)
+  const [authBusy, setAuthBusy] = useState(false)
+  const [authError, setAuthError] = useState("")
+  const [authReady, setAuthReady] = useState(() => !isSupabaseClientConfigured())
 
   const longTermGoalsForApi = useMemo(() => longTermGoalsToApiLine(goalRows), [goalRows])
 
-  const handleLocalLogin = (displayName) => {
-    const base = loadProfile()
-    const withName = {
-      ...base,
-      displayName,
-      joinedAt: base.joinedAt || new Date().toISOString(),
+  /** One in-flight hydrate per access token — avoids sign-in racing `handleSignIn` vs `onAuthStateChange`. */
+  const hydrateInFlightRef = useRef(new Map())
+  /** After hydrate succeeds for this Supabase user, ignore duplicate `SIGNED_IN` (user id is stable; JWT strings can differ). */
+  const signedInHydratedUserIdRef = useRef(null)
+
+  const readJsonOrText = async (res) => {
+    const ct = res.headers.get("content-type") || ""
+    if (ct.includes("application/json")) {
+      const j = await res.json().catch(() => ({}))
+      return { json: j, text: null }
     }
-    const next = touchVisitStreak(withName)
-    saveProfile(next)
-    setProfile(next)
+    const text = await res.text().catch(() => "")
+    return { json: {}, text: text?.slice(0, 400) || null }
   }
 
-  const downloadMemoryExport = () => {
-    const blob = new Blob([JSON.stringify(exportMemoryBundle(), null, 2)], {
-      type: "application/json",
+  const hydrateFromServer = async (token) => {
+    const h = await backendFetch("/health")
+    if (!h.ok) {
+      throw new Error(
+        `Cannot reach ORBIT backend at ${apiBase} (GET /health returned ${h.status}). Start the API (cd backend && npm start) and set VITE_API_URL in frontend/.env.development.local if you use a port other than 5050.`,
+      )
+    }
+    const hj = await h.json().catch(() => ({}))
+    if (hj.supabase_configured !== true) {
+      const env = hj.supabase_env || {}
+      const missing = []
+      if (!env.url_set) missing.push("SUPABASE_URL")
+      if (!env.anon_key_set) missing.push("SUPABASE_ANON_KEY")
+      if (!env.service_role_set) missing.push("SUPABASE_SERVICE_ROLE_KEY")
+      const hint =
+        missing.length > 0
+          ? ` Missing in backend/.env: ${missing.join(", ")}. Restart the API after saving.`
+          : " Restart the API after changing backend/.env."
+      throw new Error(
+        `Backend is not ready for account sync (supabase_configured is false).${hint} Same Supabase project must be used in frontend (VITE_SUPABASE_*) and backend (SUPABASE_*).`,
+      )
+    }
+    const visit = await backendFetch("/me/visit", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
     })
-    const a = document.createElement("a")
-    a.href = URL.createObjectURL(blob)
-    a.download = `orbit-memory-${ymdFromDate()}.json`
-    a.click()
-    URL.revokeObjectURL(a.href)
+    if (!visit.ok) {
+      const { json: err, text } = await readJsonOrText(visit)
+      if (visit.status === 404) {
+        throw new Error(
+          "POST /me/visit returned 404 — the API did not register account routes. Usually SUPABASE_ANON_KEY is missing in backend/.env (all three Supabase vars are required). Restart backend and confirm GET /health shows supabase_configured: true.",
+        )
+      }
+      if (visit.status === 401) {
+        throw new Error(
+          err.error ??
+            "Invalid or expired session on the server. Use the same Supabase project in frontend/.env.development.local (VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY) and backend/.env (SUPABASE_URL + SUPABASE_ANON_KEY).",
+        )
+      }
+      throw new Error(err.error ?? text ?? `Visit failed (${visit.status})`)
+    }
+    const r = await backendFetch("/me/state", {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    const { json: j, text: stateText } = await readJsonOrText(r)
+    if (!r.ok) {
+      if (r.status === 401) {
+        throw new Error(
+          j.error ??
+            "Invalid or expired session on /me/state. Backend anon key must match the project that issued your login (same keys as in the Supabase dashboard → Settings → API).",
+        )
+      }
+      throw new Error(j.error ?? stateText ?? `State failed (${r.status})`)
+    }
+    const p = {
+      displayName: j.displayName || "",
+      email: typeof j.email === "string" ? j.email : "",
+      lastVisitYmd: j.lastVisitYmd,
+      currentStreak: j.currentStreak ?? 0,
+      longestStreak: j.longestStreak ?? 0,
+      joinedAt: loadProfile().joinedAt || new Date().toISOString(),
+      schemaVersion: 2,
+    }
+    setProfile(p)
+    saveProfile(p)
+    const goals = Array.isArray(j.goals) ? j.goals : []
+    const cal = j.calendar && typeof j.calendar === "object" ? j.calendar : {}
+    setGoalRows(goals)
+    setCalendar(cal)
+    saveLongTermGoals(goals)
+    saveCalendar(cal)
+    if (p.email) saveLastAuthEmail(p.email)
+  }
+
+  const hydrateWithDedupe = async (token) => {
+    if (!token) return
+    const map = hydrateInFlightRef.current
+    let p = map.get(token)
+    if (!p) {
+      p = hydrateFromServer(token).finally(() => {
+        if (map.get(token) === p) map.delete(token)
+      })
+      map.set(token, p)
+    }
+    await p
+  }
+
+  useEffect(() => {
+    if (!isSupabaseClientConfigured()) return undefined
+    const sb = getSupabase()
+    if (!sb) {
+      setAuthReady(true)
+      return undefined
+    }
+
+    const init = async () => {
+      try {
+        const {
+          data: { session },
+        } = await sb.auth.getSession()
+        const t = session?.access_token ?? null
+        if (t) {
+          try {
+            await hydrateWithDedupe(t)
+            signedInHydratedUserIdRef.current = session?.user?.id ?? null
+            setAccessToken(t)
+            setAuthError("")
+          } catch (e) {
+            setAuthError(e?.message ?? String(e))
+            signedInHydratedUserIdRef.current = null
+            await sb.auth.signOut()
+            setAccessToken(null)
+          }
+        } else {
+          setAccessToken(null)
+        }
+      } finally {
+        setAuthReady(true)
+      }
+    }
+    void init()
+
+    const {
+      data: { subscription },
+    } = sb.auth.onAuthStateChange((event, session) => {
+      const tok = session?.access_token ?? null
+      if (tok) {
+        if (event === "TOKEN_REFRESHED") {
+          setAccessToken(tok)
+          return
+        }
+        if (
+          (event === "SIGNED_IN" || event === "INITIAL_SESSION") &&
+          session?.user?.id &&
+          signedInHydratedUserIdRef.current === session.user.id
+        ) {
+          setAccessToken(tok)
+          return
+        }
+        void hydrateWithDedupe(tok)
+          .then(() => {
+            signedInHydratedUserIdRef.current = session?.user?.id ?? null
+            setAccessToken(tok)
+            setAuthError("")
+          })
+          .catch(async (e) => {
+            setAuthError(e?.message ?? String(e))
+            signedInHydratedUserIdRef.current = null
+            await sb.auth.signOut()
+            setAccessToken(null)
+          })
+      } else {
+        // Do not clear authError here — signOut after a failed hydrate also hits this branch,
+        // and clearing would hide the message before the user can read it.
+        signedInHydratedUserIdRef.current = null
+        setAccessToken(null)
+        setProfile(loadProfile())
+        setGoalRows([])
+        setCalendar({})
+      }
+    })
+    return () => subscription.unsubscribe()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- hydrate uses stable apiBase from module scope
+  }, [])
+
+  useEffect(() => {
+    if (!accessToken) return undefined
+    const t = setTimeout(() => {
+      backendFetch("/me/state", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ goals: goalRows, calendar }),
+      }).catch(() => {})
+    }, 900)
+    return () => clearTimeout(t)
+  }, [goalRows, calendar, accessToken, apiBase])
+
+  const handleSignIn = async ({ email, password }) => {
+    const sb = getSupabase()
+    if (!sb) return
+    setAuthBusy(true)
+    setAuthError("")
+    let token = null
+    let userId = null
+    try {
+      const { data, error } = await sb.auth.signInWithPassword({ email, password })
+      if (error) throw error
+      token = data.session?.access_token
+      userId = data.session?.user?.id ?? null
+      if (!token) throw new Error("No session — confirm your email in Supabase if confirmations are enabled.")
+    } catch (e) {
+      signedInHydratedUserIdRef.current = null
+      await sb.auth.signOut()
+      setAccessToken(null)
+      const m = e?.message ?? String(e)
+      setAuthError(
+        isBrowserNetworkError(e)
+          ? `Cannot reach Supabase for sign-in. Check VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY in frontend/.env.development.local and your network. (${m})`
+          : m,
+      )
+      setAuthBusy(false)
+      return
+    }
+    try {
+      await hydrateWithDedupe(token)
+      signedInHydratedUserIdRef.current = userId
+      setAccessToken(token)
+      setAuthError("")
+    } catch (e) {
+      signedInHydratedUserIdRef.current = null
+      await sb.auth.signOut()
+      setAccessToken(null)
+      setAuthError(e?.message ?? String(e))
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  const handleSignUp = async ({ email, password, displayName }) => {
+    const sb = getSupabase()
+    if (!sb) return
+    setAuthBusy(true)
+    setAuthError("")
+    let token = null
+    let userId = null
+    try {
+      const { data, error } = await sb.auth.signUp({
+        email,
+        password,
+        options: { data: { display_name: displayName } },
+      })
+      if (error) throw error
+      token = data.session?.access_token
+      userId = data.session?.user?.id ?? null
+      if (!token) {
+        saveLastAuthEmail(email)
+        setAuthError(
+          "Account created. If email confirmation is on in Supabase, check your inbox then sign in.",
+        )
+        setAuthBusy(false)
+        return
+      }
+    } catch (e) {
+      signedInHydratedUserIdRef.current = null
+      await sb.auth.signOut()
+      setAccessToken(null)
+      const m = e?.message ?? String(e)
+      setAuthError(
+        isBrowserNetworkError(e)
+          ? `Cannot reach Supabase for sign-up. Check VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY and your network. (${m})`
+          : m,
+      )
+      setAuthBusy(false)
+      return
+    }
+    try {
+      await hydrateWithDedupe(token)
+      signedInHydratedUserIdRef.current = userId
+      setAccessToken(token)
+      setAuthError("")
+    } catch (e) {
+      signedInHydratedUserIdRef.current = null
+      await sb.auth.signOut()
+      setAccessToken(null)
+      setAuthError(e?.message ?? String(e))
+    } finally {
+      setAuthBusy(false)
+    }
   }
 
   const appendCalendarLinesToTasks = () => {
@@ -297,9 +629,11 @@ export default function App() {
         }
       }
 
-      const res = await fetch(`${apiBase}${endpoint}`, {
+      const headers = { "Content-Type": "application/json" }
+      if (accessToken) headers.Authorization = `Bearer ${accessToken}`
+      const res = await backendFetch(endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(body),
       })
 
@@ -341,19 +675,23 @@ export default function App() {
       setResult(data)
       if (mode === "schedule") rememberScheduleRun(data)
       else rememberNextActionRun(data)
-    } catch {
+    } catch (e) {
+      const reason =
+        e instanceof Error && e.message
+          ? e.message
+          : "Start the ORBIT API server and retry."
       setResult({
         mode: "error",
         action: "Backend not connected",
-        reason: "Start the ORBIT API server and retry.",
+        reason,
         steps: ["cd backend && npm start", "Confirm VITE_API_URL if not using :5050"],
         risk: "—",
         future_impact: "—",
         confidence: 0,
       })
+    } finally {
+      setLoading(false)
     }
-
-    setLoading(false)
   }
 
   const durationPredictions =
@@ -364,70 +702,61 @@ export default function App() {
     result?.candidates_top_3?.[0]?.title ??
     ""
 
-  if (!profile.displayName?.trim()) {
-    return <LoginOverlay onSubmit={handleLocalLogin} />
+  const rankedList = result?.orbit?.ranked ?? []
+  const riskParts =
+    result && !result.inputError ? splitRiskForDisplay(result.risk) : null
+  const llmPickTitle =
+    result && !result.inputError && result.llm_selected_task_id
+      ? taskTitleForId(result, result.llm_selected_task_id)
+      : null
+
+  if (!isSupabaseClientConfigured()) {
+    return <LoginOverlay supabaseMissing />
+  }
+
+  if (!authReady) {
+    return <div className="orbit-auth-loading">Restoring session…</div>
+  }
+
+  if (!accessToken) {
+    return (
+      <LoginOverlay
+        supabaseMissing={false}
+        onSignIn={handleSignIn}
+        onSignUp={handleSignUp}
+        busy={authBusy}
+        errorText={authError}
+        onDismissError={() => setAuthError("")}
+      />
+    )
   }
 
   return (
-    <div style={{ maxWidth: 920, margin: "32px auto", fontFamily: "system-ui, sans-serif", padding: "0 16px" }}>
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 12,
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginBottom: 16,
-          padding: "14px 16px",
-          borderRadius: 14,
-          background: "linear-gradient(120deg, #1e1b4b 0%, #312e81 55%, #4c1d95 100%)",
-          color: "#e0e7ff",
-        }}
-      >
+    <div className="orbit-app">
+      <div className="orbit-header-strip">
         <div>
-          <div style={{ fontSize: 12, opacity: 0.85 }}>Signed in locally as</div>
-          <div style={{ fontSize: 20, fontWeight: 800 }}>{profile.displayName}</div>
+          <div style={{ fontSize: 12, opacity: 0.85 }}>Signed in as</div>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>{profile.displayName?.trim() || "ORBIT user"}</div>
+          {profile.email ? (
+            <div style={{ fontSize: 13, opacity: 0.88, marginTop: 4 }}>{profile.email}</div>
+          ) : null}
         </div>
         <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
-          <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em" }}>Streak</div>
-            <div style={{ fontSize: 26, fontWeight: 800, lineHeight: 1.1 }}>{profile.currentStreak ?? 0}🔥</div>
+          <div className="orbit-streak-pill">
+            <div className="orbit-streak-pill__label">Streak</div>
+            <div className="orbit-streak-pill__value">{profile.currentStreak ?? 0}🔥</div>
           </div>
-          <div style={{ textAlign: "center", opacity: 0.9 }}>
-            <div style={{ fontSize: 11 }}>Best</div>
-            <div style={{ fontSize: 18, fontWeight: 700 }}>{profile.longestStreak ?? 0}</div>
+          <div className="orbit-streak-pill orbit-streak-pill--compact orbit-streak-pill--muted">
+            <div className="orbit-streak-pill__label">Best</div>
+            <div className="orbit-streak-pill__value">{profile.longestStreak ?? 0}</div>
           </div>
           <button
             type="button"
-            onClick={downloadMemoryExport}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 8,
-              border: "1px solid rgba(255,255,255,0.35)",
-              background: "rgba(15,23,42,0.35)",
-              color: "#fff",
-              fontWeight: 600,
-              fontSize: 13,
-              cursor: "pointer",
-            }}
-          >
-            Export memory JSON
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              const p = loadProfile()
-              saveProfile({ ...p, displayName: "" })
-              setProfile(loadProfile())
-            }}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 8,
-              border: "1px solid rgba(255,255,255,0.25)",
-              background: "transparent",
-              color: "#e0e7ff",
-              fontSize: 12,
-              cursor: "pointer",
+            className="orbit-header-btn orbit-header-btn--ghost"
+            onClick={async () => {
+              setAuthError("")
+              const sb = getSupabase()
+              await sb?.auth.signOut()
             }}
           >
             Switch user
@@ -435,64 +764,46 @@ export default function App() {
         </div>
       </div>
 
-      <h1 style={{ fontSize: 32, fontWeight: 800, letterSpacing: -0.02 }}>ORBIT AI</h1>
-      <p style={{ color: "#475569", marginBottom: 8 }}>
-        Personal life dashboard: goals, mood, and tasks → ranked next step or multi-day schedule, with Gemini
-        copy on top of transparent ORBIT Core scoring.
+      {authError ? <p className="orbit-alert">{authError}</p> : null}
+
+      <h1 className="orbit-title">ORBIT</h1>
+      <p className="orbit-lede">
+        Your space to line up what matters—goals, mood, and tasks in one view. ORBIT suggests a focused next step
+        or lays out a multi-day plan, with scoring you can follow so it never feels like a mystery why something
+        landed at the top of your list.
       </p>
       {import.meta.env.DEV && (
-        <p style={{ fontSize: 12, color: "#94a3b8", marginBottom: 16 }}>
-          API: <code style={{ fontSize: 11 }}>{apiBase}</code>
+        <p className="orbit-dev-hint">
+          API: <code>{apiBase}</code>
         </p>
       )}
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+      <div className="orbit-tabs">
         <button
           type="button"
+          className={`orbit-tab${lifeTab === "run" ? " orbit-tab--active" : ""}`}
           onClick={() => setLifeTab("run")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: 8,
-            border: lifeTab === "run" ? "2px solid #0f172a" : "1px solid #cbd5e1",
-            background: lifeTab === "run" ? "#0f172a" : "#fff",
-            color: lifeTab === "run" ? "#fff" : "#334155",
-            fontWeight: 600,
-          }}
         >
           Run ORBIT
         </button>
         <button
           type="button"
+          className={`orbit-tab${lifeTab === "calendar" ? " orbit-tab--active" : ""}`}
           onClick={() => setLifeTab("calendar")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: 8,
-            border: lifeTab === "calendar" ? "2px solid #0f172a" : "1px solid #cbd5e1",
-            background: lifeTab === "calendar" ? "#0f172a" : "#fff",
-            color: lifeTab === "calendar" ? "#fff" : "#334155",
-            fontWeight: 600,
-          }}
         >
           Calendar
         </button>
         <button
           type="button"
+          className={`orbit-tab${lifeTab === "goals" ? " orbit-tab--active" : ""}`}
           onClick={() => setLifeTab("goals")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: 8,
-            border: lifeTab === "goals" ? "2px solid #0f172a" : "1px solid #cbd5e1",
-            background: lifeTab === "goals" ? "#0f172a" : "#fff",
-            color: lifeTab === "goals" ? "#fff" : "#334155",
-            fontWeight: 600,
-          }}
         >
           Long-term goals
         </button>
       </div>
 
       {lifeTab === "calendar" && (
-        <div style={{ marginBottom: 24 }}>
+        <div className="orbit-section-stack">
           <CalendarMonth
             calendar={calendar}
             setCalendar={setCalendar}
@@ -502,7 +813,7 @@ export default function App() {
       )}
 
       {lifeTab === "goals" && (
-        <div style={{ marginBottom: 24 }}>
+        <div className="orbit-section-stack">
           <LongTermGoalsPanel
             goals={goalRows}
             setGoals={setGoalRows}
@@ -510,6 +821,7 @@ export default function App() {
             setCalendar={setCalendar}
             shortTermGoals={shortTermGoals}
             apiBase={apiBase}
+            accessToken={accessToken}
             tasks={tasks}
             setTasks={setTasks}
           />
@@ -518,38 +830,24 @@ export default function App() {
 
       {lifeTab === "run" && (
         <>
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+      <div className="orbit-tabs" style={{ marginBottom: 16 }}>
         <button
           type="button"
+          className={`orbit-tab${mode === "next_action" ? " orbit-tab--active" : ""}`}
           onClick={() => setMode("next_action")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: 8,
-            border: mode === "next_action" ? "2px solid #0f172a" : "1px solid #cbd5e1",
-            background: mode === "next_action" ? "#0f172a" : "#fff",
-            color: mode === "next_action" ? "#fff" : "#334155",
-            fontWeight: 600,
-          }}
         >
           Next action (primary)
         </button>
         <button
           type="button"
+          className={`orbit-tab${mode === "schedule" ? " orbit-tab--active" : ""}`}
           onClick={() => setMode("schedule")}
-          style={{
-            padding: "8px 14px",
-            borderRadius: 8,
-            border: mode === "schedule" ? "2px solid #0f172a" : "1px solid #cbd5e1",
-            background: mode === "schedule" ? "#0f172a" : "#fff",
-            color: mode === "schedule" ? "#fff" : "#334155",
-            fontWeight: 600,
-          }}
         >
           Multi-day schedule
         </button>
       </div>
 
-      <p style={{ fontSize: 13, color: "#64748b", marginBottom: 20 }}>
+      <p className="orbit-system-line">
         System:{" "}
         {!result
           ? "Idle"
@@ -563,68 +861,63 @@ export default function App() {
       </p>
 
       <textarea
+        className="orbit-textarea"
         placeholder="Tasks: one per line, or several on one line separated by commas (e.g. CS homework, dishes). Optional per line: est:45 due:2026-04-22 after:task_0. Time: minutes or phrases like 2 hours, 90 min."
-        style={{ width: "100%", minHeight: 110, padding: 12, marginBottom: 10, borderRadius: 8, border: "1px solid #e2e8f0" }}
+        style={{ minHeight: 110, marginBottom: 10 }}
         onChange={(e) => setTasks(e.target.value)}
         value={tasks}
       />
 
       <textarea
+        className="orbit-textarea"
         placeholder="Short-term goals — one line only, max 220 chars (1 short statement)"
         maxLength={220}
-        style={{ width: "100%", minHeight: 56, padding: 12, marginBottom: 10, borderRadius: 8, border: "1px solid #e2e8f0" }}
+        style={{ minHeight: 56, marginBottom: 10 }}
         onChange={(e) => setShortTermGoals(e.target.value)}
         value={shortTermGoals}
       />
 
       {goalRows.length > 0 ? (
-        <p style={{ fontSize: 12, color: "#64748b", marginBottom: 10, lineHeight: 1.45 }}>
+        <p className="orbit-muted-label" style={{ marginBottom: 10, lineHeight: 1.45 }}>
           <strong>Long-term</strong> (from Goals tab, sent to ORBIT):{" "}
           {longTermGoalsForApi || "—"}
         </p>
       ) : (
-        <p style={{ fontSize: 12, color: "#94a3b8", marginBottom: 10 }}>
+        <p className="orbit-muted-label" style={{ marginBottom: 10, opacity: 0.92 }}>
           Add long-term goals under the <strong>Long-term goals</strong> tab — they flow into scoring automatically.
         </p>
       )}
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
-          gap: 10,
-          marginBottom: 12,
-        }}
-      >
+      <div className="orbit-grid-inputs">
         <input
+          className="orbit-field"
           placeholder="Mood (1–5 or words)"
-          style={{ padding: 10, borderRadius: 8, border: "1px solid #e2e8f0" }}
           onChange={(e) => setMood(e.target.value)}
           value={mood}
         />
         <input
+          className="orbit-field"
           placeholder={mode === "schedule" ? "Minutes / day (or e.g. 2h)" : "Time budget (e.g. 90, 2 hours, 1h 30m)"}
-          style={{ padding: 10, borderRadius: 8, border: "1px solid #e2e8f0" }}
           onChange={(e) => setTime(e.target.value)}
           value={time}
         />
         <input
+          className="orbit-field"
           placeholder="Or hours (decimal)"
-          style={{ padding: 10, borderRadius: 8, border: "1px solid #e2e8f0" }}
           onChange={(e) => setHours(e.target.value)}
           value={hours}
         />
         {mode === "schedule" && (
           <>
             <input
+              className="orbit-field"
               placeholder="Override min/day (optional)"
-              style={{ padding: 10, borderRadius: 8, border: "1px solid #e2e8f0" }}
               onChange={(e) => setMinutesPerDay(e.target.value)}
               value={minutesPerDay}
             />
             <input
+              className="orbit-field"
               placeholder="Horizon days (1–14)"
-              style={{ padding: 10, borderRadius: 8, border: "1px solid #e2e8f0" }}
               onChange={(e) => setScheduleDays(e.target.value)}
               value={scheduleDays}
             />
@@ -634,23 +927,15 @@ export default function App() {
 
       <button
         type="button"
+        className="orbit-btn orbit-btn--primary"
         onClick={generate}
         disabled={loading}
-        style={{
-          padding: "12px 22px",
-          background: loading ? "#94a3b8" : "#0f172a",
-          color: "#fff",
-          border: "none",
-          borderRadius: 8,
-          cursor: loading ? "not-allowed" : "pointer",
-          fontWeight: 600,
-        }}
       >
         {loading ? "Running agents…" : mode === "schedule" ? "Build schedule" : "Get next action"}
       </button>
 
       {loading && (
-        <p style={{ marginTop: 16, fontStyle: "italic", color: "#64748b" }}>
+        <p className="orbit-run-hint">
           User profile → durations → ORBIT core →{" "}
           {mode === "schedule" ? "scheduler → Sentinel…" : "Sentinel (×3) → LLM pick among top 3…"}
         </p>
@@ -659,141 +944,144 @@ export default function App() {
       )}
 
       {lifeTab !== "run" && result && !result.inputError && (
-        <p style={{ fontSize: 13, color: "#64748b", marginBottom: 12 }}>
+        <p className="orbit-muted-block">
           Last ORBIT result is below — switch to <strong>Run ORBIT</strong> to regenerate.
         </p>
       )}
 
       {result && !result.inputError && result.userModel && (
-        <section
-          style={{
-            marginTop: 28,
-            padding: 16,
-            borderRadius: 12,
-            background: "#f8fafc",
-            border: "1px solid #e2e8f0",
-          }}
-        >
-          <h2 style={{ margin: "0 0 8px", fontSize: 15, color: "#334155" }}>Who you seem to be (deterministic)</h2>
-          <p style={{ margin: 0, fontSize: 14, lineHeight: 1.5, color: "#1e293b" }}>{result.userModel.summary}</p>
-          <p style={{ margin: "10px 0 0", fontSize: 12, color: "#64748b" }}>
-            Tags: {(result.userModel.tags || []).join(", ") || "—"}
-          </p>
-          {result.userModel?.behavior_profile && (
-            <p style={{ margin: "10px 0 0", fontSize: 12, color: "#475569" }}>
-              Behavior: completion{" "}
-              {result.userModel.behavior_profile.completion_rate_0_100 ?? "—"}% · procrastination proxy{" "}
-              {result.userModel.behavior_profile.procrastination_tendency_0_100 ?? "—"}/100 · focus-stability score{" "}
-              {result.userModel.behavior_profile.focus_duration_pattern_score_0_100 ?? "—"}/100 · ignored logged{" "}
-              {result.userModel.behavior_profile.ignored_recommendations_count ?? 0}
-            </p>
-          )}
+        <section className="orbit-run-profile-card">
+          <div className="orbit-run-profile-card__top">
+            <h2 className="orbit-run-profile-card__title">How ORBIT sees you</h2>
+            {result.debug?.narrative_source === "deterministic_fallback" ? (
+              <span className="orbit-run-pill orbit-run-pill--muted" title={result.debug?.llm?.error}>
+                Standard coaching copy
+              </span>
+            ) : result.debug?.narrative_source === "gemini" ? (
+              <span className="orbit-run-pill orbit-run-pill--accent">Personalized notes</span>
+            ) : null}
+          </div>
+          <p className="orbit-run-profile-card__summary">{result.userModel.summary}</p>
+          {(result.userModel.tags || []).length > 0 ? (
+            <div className="orbit-run-tag-row" aria-label="Tags">
+              {(result.userModel.tags || []).map((t) => (
+                <span key={t} className="orbit-run-tag">
+                  {t}
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {result.userModel?.behavior_profile ? (
+            <dl className="orbit-run-behavior-grid">
+              <div className="orbit-run-behavior-cell">
+                <dt>Completion</dt>
+                <dd>{result.userModel.behavior_profile.completion_rate_0_100 ?? "—"}%</dd>
+              </div>
+              <div className="orbit-run-behavior-cell">
+                <dt>Procrastination signal</dt>
+                <dd>{result.userModel.behavior_profile.procrastination_tendency_0_100 ?? "—"}/100</dd>
+              </div>
+              <div className="orbit-run-behavior-cell">
+                <dt>Focus stability</dt>
+                <dd>{result.userModel.behavior_profile.focus_duration_pattern_score_0_100 ?? "—"}/100</dd>
+              </div>
+              <div className="orbit-run-behavior-cell">
+                <dt>Ignored suggestions</dt>
+                <dd>{result.userModel.behavior_profile.ignored_recommendations_count ?? 0}</dd>
+              </div>
+            </dl>
+          ) : null}
         </section>
       )}
 
       {result && !result.inputError && (
-        <section style={{ marginTop: 20 }}>
-          <h2 style={{ fontSize: 18, marginBottom: 8 }}>Plan headline</h2>
-          {!result.inputError &&
-            Array.isArray(result.orbit?.ranked) &&
-            result.orbit.ranked.length > 0 && (
-              <div
-                style={{
-                  marginBottom: 18,
-                  padding: "12px 14px",
-                  background: "#f8fafc",
-                  borderRadius: 8,
-                  fontSize: 14,
-                  color: "#334155",
-                }}
-              >
-                <b>How your tasks ranked</b>
-                <p style={{ margin: "6px 0 0", color: "#64748b", lineHeight: 1.45 }}>
-                  {result.orbit.ranked.length === 1
-                    ? "One task — it becomes the next action."
-                    : `ORBIT scored ${result.orbit.ranked.length} task(s) and ordered them. The headline below is the pick for right now.`}
-                </p>
-                {result.orbit.ranked.length > 1 && (
-                  <ol style={{ margin: "10px 0 0", paddingLeft: 22, lineHeight: 1.5 }}>
-                    {result.orbit.ranked.map((r, i) => (
-                      <li
-                        key={r.id ?? i}
-                        style={{
-                          fontWeight: i === 0 ? 600 : 400,
-                          color: i === 0 ? "#0f172a" : "#475569",
-                        }}
-                      >
-                        {r.title}
-                        <span style={{ color: "#94a3b8", fontWeight: 400 }}>
-                          {" "}
-                          — orbit {r.orbitScore}
-                        </span>
-                      </li>
-                    ))}
-                  </ol>
-                )}
-              </div>
-            )}
-          <p style={{ fontSize: 17, fontWeight: 600, margin: "0 0 12px", lineHeight: 1.35 }}>{result.action}</p>
-          <div style={{ marginBottom: 12 }}>
+        <section className="orbit-run-plan">
+          {rankedList.length > 0 && (
+            <div className="orbit-run-rank-card">
+              <div className="orbit-run-section-label">Task ranking</div>
+              <p className="orbit-run-lead">
+                {rankedList.length === 1
+                  ? "One task on your list — this is your focus."
+                  : `We compared ${rankedList.length} tasks using your goals, time, and risk signals. #1 is the best match right now.`}
+              </p>
+              {rankedList.length > 1 ? (
+                <ol className="orbit-run-rank-list">
+                  {rankedList.map((r, i) => (
+                    <li
+                      key={r.id ?? i}
+                      className={i === 0 ? "orbit-run-rank-li orbit-run-rank-li--top" : "orbit-run-rank-li"}
+                    >
+                      <span className="orbit-run-rank-li__title">{r.title}</span>
+                      <span className="orbit-run-rank-li__score" title="ORBIT composite score">
+                        {formatOrbitScoreShort(r.orbitScore)}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              ) : null}
+            </div>
+          )}
+
+          <div className="orbit-run-hero">
+            <div className="orbit-run-section-label">
+              {result.mode === "single_next_action" ? "Your next step" : "Headline"}
+            </div>
+            <p className="orbit-run-hero__action">{result.action}</p>
             <button
               type="button"
+              className="orbit-btn--outline orbit-btn--outline-indigo orbit-run-hero__btn"
               onClick={pinHeadlineToCalendar}
               disabled={!primaryBlockTitle}
-              style={{
-                padding: "8px 12px",
-                borderRadius: 8,
-                border: "1px solid #6366f1",
-                background: "#eef2ff",
-                fontWeight: 600,
-                fontSize: 13,
-                cursor: primaryBlockTitle ? "pointer" : "not-allowed",
-              }}
             >
-              Pin headline to today (calendar)
+              {"Add to today's calendar"}
             </button>
           </div>
-          {result.llm_selected_task_id && (
-            <p style={{ fontSize: 13, color: "#64748b", marginBottom: 8 }}>
-              LLM choice among top-3 (validated):{" "}
-              <code style={{ fontSize: 12 }}>{result.llm_selected_task_id}</code>
-            </p>
-          )}
-          <p style={{ fontSize: 14, color: "#334155", lineHeight: 1.5 }}>{result.reason}</p>
+
+          {llmPickTitle ? (
+            <div className="orbit-run-align">
+              <span className="orbit-run-align__label">Assistant alignment</span>
+              <p className="orbit-run-align__text">
+                The narrative layer matched <strong>{llmPickTitle}</strong> as the task to emphasize among your top
+                picks.
+              </p>
+            </div>
+          ) : null}
+
+          <div className="orbit-run-reason-card">
+            <div className="orbit-run-section-label">Why this pick</div>
+            <p className="orbit-run-prose">{result.reason}</p>
+          </div>
         </section>
       )}
 
       {result && !result.inputError && result.schedule && (
-        <section style={{ marginTop: 24 }}>
-          <h2 style={{ fontSize: 18, marginBottom: 12 }}>Schedule by day</h2>
-          <p style={{ fontSize: 13, color: "#64748b", marginTop: -6, marginBottom: 14 }}>
+        <section className="orbit-schedule-section">
+          <h2>Schedule by day</h2>
+          <p className="orbit-schedule-meta">
             Times are minute offsets in your work window (00:00 = start of the block you protect for deep work).
           </p>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             {result.schedule.days.map((day) => (
-              <div
-                key={day.dayIndex}
-                style={{
-                  border: "1px solid #e2e8f0",
-                  borderRadius: 10,
-                  padding: 12,
-                  background: "#fff",
-                }}
-              >
-                <div style={{ fontWeight: 700, marginBottom: 8, color: "#0f172a" }}>
+              <div key={day.dayIndex} className="orbit-schedule-day">
+                <div className="orbit-schedule-day__title">
                   Day {day.dayIndex + 1} · {day.date}{" "}
-                  <span style={{ fontWeight: 500, color: "#64748b", fontSize: 13 }}>
+                  <span className="orbit-schedule-day__meta">
                     ({day.usedMinutes}/{day.capacityMinutes} min used)
                   </span>
                 </div>
                 {day.blocks.length === 0 ? (
-                  <div style={{ color: "#94a3b8", fontSize: 14 }}>No blocks (overflow or empty).</div>
+                  <div className="orbit-muted-label" style={{ fontSize: 14 }}>
+                    No blocks (overflow or empty).
+                  </div>
                 ) : (
                   <ol style={{ margin: 0, paddingLeft: 20, lineHeight: 1.6 }}>
                     {day.blocks.map((b, i) => (
                       <li key={`${day.dayIndex}-${i}-${b.taskId}`}>
                         <strong>{formatClock(b.startMinuteInDay)}–{formatClock(b.endMinuteInDay)}</strong> ·{" "}
-                        {b.title} <span style={{ color: "#64748b" }}>({b.minutes} min)</span>
+                        {b.title}{" "}
+                        <span className="orbit-muted-label" style={{ display: "inline" }}>
+                          ({b.minutes} min)
+                        </span>
                       </li>
                     ))}
                   </ol>
@@ -802,17 +1090,7 @@ export default function App() {
             ))}
           </div>
           {result.schedule.overflow?.length > 0 && (
-            <div
-              style={{
-                marginTop: 14,
-                padding: 12,
-                borderRadius: 8,
-                background: "#fff7ed",
-                border: "1px solid #fed7aa",
-                color: "#9a3412",
-                fontSize: 14,
-              }}
-            >
+            <div className="orbit-banner-warn">
               <strong>Did not fit</strong>:{" "}
               {result.schedule.overflow.map((o) => `${o.title} (${o.unscheduledMinutes}m left)`).join("; ")}
             </div>
@@ -821,22 +1099,22 @@ export default function App() {
       )}
 
       {result && !result.inputError && durationPredictions.length > 0 && (
-        <section style={{ marginTop: 22 }}>
-          <h2 style={{ fontSize: 18, marginBottom: 8 }}>Duration agent</h2>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <section className="orbit-table-section">
+          <h2>Duration agent</h2>
+          <table className="orbit-data-table">
             <thead>
-              <tr style={{ textAlign: "left", borderBottom: "1px solid #e2e8f0" }}>
-                <th style={{ padding: "8px 6px" }}>Task</th>
-                <th style={{ padding: "8px 6px" }}>Minutes</th>
-                <th style={{ padding: "8px 6px" }}>Source</th>
+              <tr>
+                <th>Task</th>
+                <th>Minutes</th>
+                <th>Source</th>
               </tr>
             </thead>
             <tbody>
               {durationPredictions.map((p) => (
-                <tr key={p.id} style={{ borderBottom: "1px solid #f1f5f9" }}>
-                  <td style={{ padding: "8px 6px" }}>{p.title}</td>
-                  <td style={{ padding: "8px 6px" }}>{p.minutes}</td>
-                  <td style={{ padding: "8px 6px", color: "#64748b" }}>{p.source.replace(/_/g, " ")}</td>
+                <tr key={p.id}>
+                  <td>{p.title}</td>
+                  <td>{p.minutes}</td>
+                  <td className="orbit-td-muted">{p.source.replace(/_/g, " ")}</td>
                 </tr>
               ))}
             </tbody>
@@ -844,171 +1122,178 @@ export default function App() {
         </section>
       )}
 
-      {result && !result.inputError && (
-        <>
-          <div
-            style={{
-              marginTop: 22,
-              padding: 14,
-              borderLeft: "4px solid #b91c1c",
-              background: "#fef2f2",
-              borderRadius: "0 8px 8px 0",
-            }}
-          >
-            <b style={{ color: "#991b1b" }}>Risk</b> <span style={{ color: "#991b1b" }}>(Sentinel · first slot)</span>
-            <div style={{ marginTop: 6, whiteSpace: "pre-line", color: "#1f2937" }}>{result.risk}</div>
-          </div>
-          <p style={{ marginTop: 16, fontSize: 14, color: "#475569", lineHeight: 1.5 }}>
-            <b>Future impact</b>
-            <br />
-            {result.future_impact}
-          </p>
-          <p style={{ margin: "14px 0", fontSize: 15 }}>
-            <b>Confidence</b> (composite): {result.confidence}%
-            {result.confidence_margin_percent != null && (
-              <span style={{ color: "#64748b", fontSize: 13 }}>
-                {" "}
-                · margin-only: {result.confidence_margin_percent}%
-              </span>
-            )}
-          </p>
-          {result.confidence_breakdown && (
-            <div
-              style={{
-                marginBottom: 16,
-                padding: 12,
-                background: "#f1f5f9",
-                borderRadius: 8,
-                fontSize: 13,
-                lineHeight: 1.5,
-              }}
-            >
-              <b>Confidence breakdown</b>
-              <ul style={{ margin: "8px 0 0", paddingLeft: 18 }}>
-                <li>Data quality: {result.confidence_breakdown.data_confidence}</li>
-                <li>Decision stability: {result.confidence_breakdown.decision_stability}</li>
-                <li>Risk uncertainty (lower = riskier context): {result.confidence_breakdown.risk_uncertainty}</li>
-              </ul>
-              <p style={{ margin: "8px 0 0", color: "#64748b" }}>
-                {result.confidence_breakdown.note}
-              </p>
+      {result && !result.inputError && riskParts && (
+        <div className="orbit-run-followup">
+          <section className={orbitRiskCardClass(result.sentinel?.riskLevel)}>
+            <div className="orbit-risk-card__header">
+              <span className="orbit-risk-card__title">Schedule risk</span>
+              <span className="orbit-risk-card__subtitle">Sentinel check on your top task</span>
             </div>
-          )}
-          {result.alternatives && result.alternatives.length > 0 && (
-            <div style={{ marginBottom: 18 }}>
-              <h3 style={{ fontSize: 16, marginBottom: 6 }}>Alternative options</h3>
-              <ul style={{ lineHeight: 1.5 }}>
+            {riskParts.coreLines.length > 0 ? (
+              <ul className="orbit-risk-card__lines">
+                {riskParts.coreLines.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="orbit-risk-card__empty">No risk summary.</p>
+            )}
+            {riskParts.tipLines.map((line) => (
+              <p key={line} className="orbit-risk-card__tip">
+                {line}
+              </p>
+            ))}
+            {riskParts.memoryLines.map((line) => (
+              <p key={line} className="orbit-risk-card__memory">
+                {line}
+              </p>
+            ))}
+            {riskParts.otherLines.length > 0 ? (
+              <div className="orbit-risk-card__others">
+                <div className="orbit-run-section-label">Other strong tasks</div>
+                <ul className="orbit-risk-card__other-list">
+                  {riskParts.otherLines.map((line) => (
+                    <li key={line}>{line}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </section>
+
+          <div className="orbit-run-prose-block">
+            <div className="orbit-run-section-label">If you follow through</div>
+            <p className="orbit-run-prose">{result.future_impact}</p>
+          </div>
+
+          <div className="orbit-run-confidence">
+            <div className="orbit-run-section-label">Confidence in this suggestion</div>
+            <div className="orbit-run-confidence__stats">
+              <div className="orbit-run-stat-pill">
+                <span className="orbit-run-stat-pill__value">{result.confidence}%</span>
+                <span className="orbit-run-stat-pill__label">Overall</span>
+              </div>
+              {result.confidence_margin_percent != null ? (
+                <div className="orbit-run-stat-pill orbit-run-stat-pill--secondary">
+                  <span className="orbit-run-stat-pill__value">{result.confidence_margin_percent}%</span>
+                  <span className="orbit-run-stat-pill__label">Lead vs runner-up</span>
+                </div>
+              ) : null}
+            </div>
+            {result.confidence_breakdown ? (
+              <div className="orbit-breakdown-box orbit-run-breakdown">
+                <div className="orbit-run-breakdown__grid">
+                  <div>
+                    <span className="orbit-run-breakdown__k">Data quality</span>
+                    <span className="orbit-run-breakdown__v">{result.confidence_breakdown.data_confidence}</span>
+                  </div>
+                  <div>
+                    <span className="orbit-run-breakdown__k">Decision stability</span>
+                    <span className="orbit-run-breakdown__v">{result.confidence_breakdown.decision_stability}</span>
+                  </div>
+                  <div>
+                    <span className="orbit-run-breakdown__k">Risk uncertainty</span>
+                    <span className="orbit-run-breakdown__v">{result.confidence_breakdown.risk_uncertainty}</span>
+                  </div>
+                </div>
+                <p className="orbit-run-breakdown__note">{result.confidence_breakdown.note}</p>
+              </div>
+            ) : null}
+          </div>
+
+          {result.alternatives && result.alternatives.length > 0 ? (
+            <div className="orbit-run-alt-section">
+              <div className="orbit-run-section-label">Solid runners-up</div>
+              <ul className="orbit-run-alt-grid">
                 {result.alternatives.map((a) => (
-                  <li key={a.id}>
-                    <strong>{a.title}</strong> (score {a.orbitScore}) — {a.one_line}
+                  <li key={a.id} className="orbit-run-alt-card">
+                    <div className="orbit-run-alt-card__head">
+                      <span className="orbit-run-alt-card__title">{a.title}</span>
+                      <span className="orbit-run-alt-card__badge">{formatOrbitScoreShort(a.orbitScore)}</span>
+                    </div>
+                    <p className="orbit-run-alt-card__meta">{a.one_line}</p>
                   </li>
                 ))}
               </ul>
             </div>
-          )}
-          {result.tradeoffs && (
-            <div style={{ marginBottom: 18 }}>
-              <h3 style={{ fontSize: 16, marginBottom: 6 }}>Tradeoffs</h3>
-              <p style={{ fontSize: 14, lineHeight: 1.55, color: "#334155" }}>{result.tradeoffs}</p>
+          ) : null}
+
+          {result.tradeoffs ? (
+            <div className="orbit-run-prose-block">
+              <div className="orbit-run-section-label">Tradeoffs</div>
+              <p className="orbit-run-prose">{result.tradeoffs}</p>
             </div>
-          )}
+          ) : null}
+
           {result.schedule?.discarded_from_packing?.length > 0 && (
-            <div
-              style={{
-                marginBottom: 16,
-                padding: 10,
-                background: "#fefce8",
-                border: "1px solid #fde047",
-                borderRadius: 8,
-                fontSize: 13,
-              }}
-            >
+            <div className="orbit-banner-yellow">
               <b>Auto-discarded from packing</b> (still in full rank list):{" "}
               {result.schedule.discarded_from_packing
                 .map((d) => `${d.title} (${d.orbitScore?.toFixed?.(3) ?? d.orbitScore})`)
                 .join("; ")}
             </div>
           )}
-          <div
-            style={{
-              marginBottom: 20,
-              padding: 12,
-              border: "1px solid #cbd5e1",
-              borderRadius: 8,
-              background: "#fff",
-            }}
-          >
-            <b>Feedback loop</b> — log whether you followed the first block (updates behavior profile on next run).
-            <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-              <span style={{ fontSize: 13, color: "#475569" }}>
-                First block: <em>{primaryBlockTitle || "—"}</em>
-              </span>
+
+          <div className="orbit-feedback-card orbit-run-feedback">
+            <div className="orbit-run-section-label">Quick feedback</div>
+            <p className="orbit-run-feedback__hint">
+              Log what you actually did so the next run can tune to you. Applies to:{" "}
+              <strong>{primaryBlockTitle || "—"}</strong>
+            </p>
+            <div className="orbit-feedback-card__row">
               <button
                 type="button"
+                className="orbit-btn--sm orbit-btn--success"
                 disabled={!primaryBlockTitle}
                 onClick={() => {
                   pushBehaviorOutcome({ outcome: "done", topTitle: primaryBlockTitle })
-                  setFeedbackNote("Logged as done (local). Regenerate to refresh profile.")
+                  setFeedbackNote("Saved locally. Run ORBIT again to refresh your profile.")
                 }}
-                style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #16a34a", background: "#f0fdf4" }}
               >
-                Mark done
+                I did this
               </button>
               <button
                 type="button"
+                className="orbit-btn--sm orbit-btn--caution"
                 disabled={!primaryBlockTitle}
                 onClick={() => {
                   pushBehaviorOutcome({ outcome: "ignored", topTitle: primaryBlockTitle })
                   nudgePolicyAfterIgnored()
                   pushDurationHintFromTitle(primaryBlockTitle)
                   setFeedbackNote(
-                    "Logged as ignored. Policy weights + duration hints nudged locally — regenerate to apply.",
+                    "Saved as skipped. We nudged weights and duration hints locally — regenerate to apply.",
                   )
                 }}
-                style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #b45309", background: "#fffbeb" }}
               >
-                Mark ignored
+                I skipped it
               </button>
             </div>
-            {feedbackNote && (
-              <p style={{ margin: "8px 0 0", fontSize: 13, color: "#15803d" }}>{feedbackNote}</p>
-            )}
+            {feedbackNote ? <p className="orbit-feedback-note">{feedbackNote}</p> : null}
           </div>
-          <h3 style={{ fontSize: 16 }}>Next steps</h3>
-          <ul style={{ lineHeight: 1.55 }}>
-            {result?.steps?.map((s, i) => (
-              <li key={i}>{s}</li>
-            ))}
-          </ul>
-        </>
+
+          {result.steps && result.steps.length > 0 ? (
+            <div className="orbit-run-next">
+              <div className="orbit-run-section-label">Concrete next moves</div>
+              <ol className="orbit-run-next__list">
+                {result.steps.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ol>
+            </div>
+          ) : null}
+        </div>
       )}
 
       {result?.agents && (
-        <details style={{ marginTop: 20 }}>
-          <summary style={{ cursor: "pointer", fontWeight: 600, color: "#334155" }}>
-            Agent trace (audit)
-          </summary>
-          <pre
-            style={{
-              marginTop: 10,
-              padding: 12,
-              background: "#0f172a",
-              color: "#e2e8f0",
-              borderRadius: 8,
-              fontSize: 11,
-              overflow: "auto",
-              maxHeight: 420,
-            }}
-          >
-            {JSON.stringify(result.agents, null, 2)}
-          </pre>
+        <details className="orbit-agent-details">
+          <summary>Agent trace (audit)</summary>
+          <pre className="orbit-agent-pre">{JSON.stringify(result.agents, null, 2)}</pre>
         </details>
       )}
 
       {result?.inputError && (
-        <div style={{ marginTop: 24, padding: 16, border: "1px solid #fecaca", borderRadius: 8, background: "#fef2f2" }}>
+        <div className="orbit-input-error">
           <strong>{result.action}</strong>
-          <p style={{ margin: "8px 0 0" }}>{result.reason}</p>
+          <p>{result.reason}</p>
           <ul>
             {result.steps?.map((s, i) => (
               <li key={i}>{s}</li>

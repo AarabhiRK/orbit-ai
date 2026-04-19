@@ -63,16 +63,9 @@ export default function CalendarMonth({ calendar, setCalendar, onAppendTasksFrom
   const label = new Date(year, monthIndex, 1).toLocaleString(undefined, { month: "long", year: "numeric" })
 
   return (
-    <div
-      style={{
-        padding: 20,
-        borderRadius: 14,
-        border: "1px solid #e2e8f0",
-        background: "#fff",
-      }}
-    >
+    <div className="orbit-panel orbit-panel--soft">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h2 style={{ margin: 0, fontSize: 20, color: "#0f172a" }}>Life calendar</h2>
+        <h2 style={{ margin: 0, fontSize: 20 }}>Life calendar</h2>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <button
             type="button"

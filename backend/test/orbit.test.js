@@ -28,6 +28,11 @@ import { ORBIT_WEIGHTS } from "../src/constants.js"
 import { buildBehaviorProfileSnapshot, sanitizeBehaviorOutcomes } from "../src/behaviorMemory.js"
 import { formatSentinelRiskLine } from "../src/sentinel.js"
 import { partitionScheduleRows } from "../src/scoring.js"
+import {
+  getGeminiModelCandidates,
+  isGeminiRetryableQuotaError,
+} from "../src/geminiModel.js"
+import { extractJsonObject } from "../src/geminiJsonExtract.js"
 
 beforeEach(() => {
   __setGeminiPolishStub(async (payload) => ({
@@ -343,6 +348,54 @@ test("generateSchedule returns agents and schedule", async () => {
   assert.ok(Array.isArray(out.agents))
   assert.ok(out.userModel?.archetype)
   assert.ok(out.schedule?.days?.length >= 1)
+})
+
+test("getGeminiModelCandidates prefers GEMINI_MODEL then fallbacks", () => {
+  const prev = process.env.GEMINI_MODEL
+  process.env.GEMINI_MODEL = "my-primary"
+  try {
+    const c = getGeminiModelCandidates()
+    assert.equal(c[0], "my-primary")
+    assert.ok(c.includes("gemini-2.5-flash"))
+    assert.equal(c.filter((id) => id === "my-primary").length, 1)
+  } finally {
+    if (prev === undefined) delete process.env.GEMINI_MODEL
+    else process.env.GEMINI_MODEL = prev
+  }
+})
+
+test("isGeminiRetryableQuotaError detects 429 and quota copy", () => {
+  assert.equal(isGeminiRetryableQuotaError(new Error("[429 Too Many Requests]")), true)
+  assert.equal(isGeminiRetryableQuotaError(new Error("Quota exceeded for metric")), true)
+  assert.equal(isGeminiRetryableQuotaError({ status: 429, message: "short" }), true)
+  assert.equal(isGeminiRetryableQuotaError(new Error("invalid api key")), false)
+})
+
+test("getGeminiModelCandidates deprioritizes gemini-2.0-flash when set as GEMINI_MODEL", () => {
+  const prev = process.env.GEMINI_MODEL
+  process.env.GEMINI_MODEL = "gemini-2.0-flash"
+  try {
+    const c = getGeminiModelCandidates()
+    assert.equal(c[0], "gemini-2.5-flash")
+    assert.equal(c[c.length - 1], "gemini-2.0-flash")
+  } finally {
+    if (prev === undefined) delete process.env.GEMINI_MODEL
+    else process.env.GEMINI_MODEL = prev
+  }
+})
+
+test("extractJsonObject parses JSON embedded after preamble", () => {
+  const inner = JSON.stringify({
+    reason: "r".repeat(40),
+    future_impact: "f".repeat(40),
+    tradeoffs: "t".repeat(60),
+    selected_task_id: null,
+  })
+  const text = `Here is the structured output.\n\n${inner}\n\nLet me know if you need changes.`
+  const o = extractJsonObject(text)
+  assert.ok(o)
+  assert.equal(o.reason, "r".repeat(40))
+  assert.equal(o.future_impact, "f".repeat(40))
 })
 
 test("planLongTermGoalSteps returns steps from stub", async () => {

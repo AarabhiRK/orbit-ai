@@ -3,6 +3,7 @@
 const K_PROFILE = "orbit_v2_profile"
 const K_LT_GOALS = "orbit_v2_long_term_goals"
 const K_CALENDAR = "orbit_v2_calendar"
+const K_LAST_AUTH_EMAIL = "orbit_v1_last_auth_email"
 
 export function ymdFromDate(d = new Date()) {
   const y = d.getFullYear()
@@ -29,6 +30,8 @@ function daysBetweenYmd(a, b) {
 function defaultProfile() {
   return {
     displayName: "",
+    /** Account email from GET /me/state (Supabase auth); not used for authentication. */
+    email: "",
     lastVisitYmd: null,
     currentStreak: 0,
     longestStreak: 0,
@@ -51,6 +54,25 @@ export function loadProfile() {
 export function saveProfile(p) {
   try {
     localStorage.setItem(K_PROFILE, JSON.stringify(p))
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Prefill the sign-in email field after refresh (local only). */
+export function loadLastAuthEmail() {
+  try {
+    const e = localStorage.getItem(K_LAST_AUTH_EMAIL)
+    return typeof e === "string" ? e : ""
+  } catch {
+    return ""
+  }
+}
+
+export function saveLastAuthEmail(email) {
+  try {
+    const t = String(email || "").trim()
+    if (t) localStorage.setItem(K_LAST_AUTH_EMAIL, t)
   } catch {
     /* ignore */
   }
@@ -165,25 +187,3 @@ export function collectUncheckedCalendarTaskLines(cal) {
   return lines
 }
 
-export function exportMemoryBundle() {
-  return {
-    exportedAt: new Date().toISOString(),
-    profile: loadProfile(),
-    longTermGoals: loadLongTermGoals(),
-    calendar: loadCalendar(),
-    sessionMemory: safeParse("orbit_v1_session_memory"),
-    behavior: safeParse("orbit_v1_behavior_outcomes"),
-    policy: safeParse("orbit_v1_policy_deltas"),
-    durationHints: safeParse("orbit_v1_duration_hint_overrides"),
-  }
-}
-
-function safeParse(key) {
-  try {
-    const raw = localStorage.getItem(key)
-    if (!raw) return null
-    return JSON.parse(raw)
-  } catch {
-    return null
-  }
-}

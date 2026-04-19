@@ -1,82 +1,135 @@
 import { useState } from "react"
+import { loadLastAuthEmail } from "../lib/orbitLocalStore.js"
 
 /**
- * Local “sign-in” — display name only (no server auth). Unlocks streak + unified memory UX.
+ * Email + password auth via Supabase (cross-device). Create account sets display name in user metadata.
  */
-export default function LoginOverlay({ onSubmit }) {
-  const [name, setName] = useState("")
+export default function LoginOverlay({
+  onSignIn,
+  onSignUp,
+  busy,
+  errorText,
+  onDismissError,
+  supabaseMissing,
+}) {
+  const [mode, setMode] = useState("signin")
+  const [email, setEmail] = useState(() => loadLastAuthEmail())
+  const [password, setPassword] = useState("")
+  const [displayName, setDisplayName] = useState("")
+
+  if (supabaseMissing) {
+    return (
+      <div className="orbit-login-backdrop">
+        <div className="orbit-login-card orbit-login-card--wide">
+          <h1>Supabase not configured in the frontend</h1>
+          <p className="orbit-login-lede" style={{ marginBottom: 12 }}>
+            Add to <code style={{ color: "#fca5a5" }}>frontend/.env.development.local</code>:
+          </p>
+          <pre className="orbit-login-pre">
+            {`VITE_SUPABASE_URL=https://YOUR-REF.supabase.co
+VITE_SUPABASE_ANON_KEY=your_anon_public_key`}
+          </pre>
+          <p style={{ color: "#94a3b8", fontSize: 13, marginTop: 14 }}>
+            Backend also needs <code>SUPABASE_URL</code>, <code>SUPABASE_ANON_KEY</code>, and{" "}
+            <code>SUPABASE_SERVICE_ROLE_KEY</code> in <code>backend/.env</code>. Restart both servers after saving.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  const submit = () => {
+    if (mode === "signin") {
+      onSignIn({ email: email.trim(), password })
+    } else {
+      onSignUp({
+        email: email.trim(),
+        password,
+        displayName: displayName.trim() || email.trim().split("@")[0] || "ORBIT user",
+      })
+    }
+  }
+
+  const canSubmit = email.trim().length > 3 && password.length >= 6
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 50,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 24,
-        background: "linear-gradient(145deg, #0f172a 0%, #1e293b 45%, #312e81 100%)",
-        color: "#e2e8f0",
-      }}
-    >
-      <div
-        style={{
-          width: "min(420px, 100%)",
-          padding: 28,
-          borderRadius: 16,
-          background: "rgba(15, 23, 42, 0.85)",
-          border: "1px solid rgba(148, 163, 184, 0.35)",
-          boxShadow: "0 24px 80px rgba(0,0,0,0.45)",
-        }}
-      >
-        <div style={{ fontSize: 13, letterSpacing: "0.12em", textTransform: "uppercase", color: "#a5b4fc" }}>
-          ORBIT · local session
+    <div className="orbit-login-backdrop">
+      <div className="orbit-login-card">
+        <div className="orbit-login-eyebrow">ORBIT</div>
+        <h1>Sign in to your dashboard</h1>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 16, marginTop: 4 }}>
+          <button
+            type="button"
+            className={`orbit-login-toggle${mode === "signin" ? " orbit-login-toggle--active" : ""}`}
+            onClick={() => setMode("signin")}
+          >
+            Sign in
+          </button>
+          <button
+            type="button"
+            className={`orbit-login-toggle${mode === "signup" ? " orbit-login-toggle--active" : ""}`}
+            onClick={() => setMode("signup")}
+          >
+            Create account
+          </button>
         </div>
-        <h1 style={{ margin: "10px 0 8px", fontSize: 26, fontWeight: 800 }}>Welcome back, builder</h1>
-        <p style={{ margin: "0 0 20px", fontSize: 14, lineHeight: 1.55, color: "#cbd5e1" }}>
-          Choose a display name. We keep your runs, outcomes, hints, goals, and calendar on{" "}
-          <strong>this device</strong> — daily streak tracks each day you open ORBIT.
-        </p>
-        <label style={{ display: "block", fontSize: 13, marginBottom: 6, color: "#94a3b8" }}>
-          Display name
-        </label>
+
+        {errorText ? (
+          <div role="alert" aria-live="polite" className="orbit-login-error">
+            <p style={{ margin: "0 0 8px", lineHeight: 1.45 }}>{errorText}</p>
+            {onDismissError ? (
+              <button type="button" className="orbit-login-error-dismiss" onClick={onDismissError}>
+                Dismiss
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
+        <label className="orbit-login-label">Email</label>
         <input
-          autoFocus
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && name.trim()) onSubmit(name.trim())
-          }}
-          placeholder="e.g. Alex"
-          style={{
-            width: "100%",
-            padding: "12px 14px",
-            borderRadius: 10,
-            border: "1px solid #475569",
-            background: "#0f172a",
-            color: "#f8fafc",
-            fontSize: 16,
-            marginBottom: 16,
-          }}
+          autoComplete="email"
+          className="orbit-login-input"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@university.edu"
+          style={{ marginBottom: 12 }}
         />
+
+        <label className="orbit-login-label">Password (min 6)</label>
+        <input
+          type="password"
+          autoComplete={mode === "signin" ? "current-password" : "new-password"}
+          className="orbit-login-input"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && canSubmit && !busy) submit()
+          }}
+          style={{ marginBottom: 12 }}
+        />
+
+        {mode === "signup" && (
+          <>
+            <label className="orbit-login-label">Display name</label>
+            <input
+              autoComplete="nickname"
+              className="orbit-login-input"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="How ORBIT greets you in the header"
+              style={{ marginBottom: 16 }}
+            />
+          </>
+        )}
+
         <button
           type="button"
-          disabled={!name.trim()}
-          onClick={() => onSubmit(name.trim())}
-          style={{
-            width: "100%",
-            padding: "14px 18px",
-            borderRadius: 10,
-            border: "none",
-            background: name.trim() ? "linear-gradient(90deg, #6366f1, #8b5cf6)" : "#475569",
-            color: "#fff",
-            fontWeight: 700,
-            fontSize: 15,
-            cursor: name.trim() ? "pointer" : "not-allowed",
-          }}
+          className="orbit-login-submit"
+          disabled={!canSubmit || busy}
+          onClick={submit}
         >
-          Enter dashboard
+          {busy ? "Please wait…" : mode === "signin" ? "Sign in" : "Create account & continue"}
         </button>
       </div>
     </div>
