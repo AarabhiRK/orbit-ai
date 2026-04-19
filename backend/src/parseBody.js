@@ -1,4 +1,5 @@
 import { sanitizeMemoryRecent } from "./parseMemory.js"
+import { taskStringsFromRaw } from "./normalizeTasks.js"
 
 export class ValidationError extends Error {
   constructor(message) {
@@ -21,6 +22,45 @@ export function moodToEnergy(mood) {
   if (n === 5) return "high"
   if (n === 3 || n === 4) return "medium"
   return "medium"
+}
+
+/**
+ * Minutes from UI: plain number, "120", "2 hours", "90 min", "1h 30m".
+ * @param {unknown} timeRaw
+ * @returns {number}
+ */
+export function parseTimeMinutes(timeRaw) {
+  if (typeof timeRaw === "number" && Number.isFinite(timeRaw) && timeRaw > 0) {
+    return Math.round(timeRaw)
+  }
+  if (typeof timeRaw !== "string") return NaN
+  const s = timeRaw.trim().toLowerCase()
+  if (!s) return NaN
+
+  if (/^\d+$/.test(s)) {
+    return Number.parseInt(s, 10)
+  }
+
+  const hoursOnly = /^\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\s*$/i.exec(s)
+  if (hoursOnly) {
+    return Math.max(1, Math.round(Number(hoursOnly[1]) * 60))
+  }
+
+  const minsOnly = /^\s*(\d+)\s*(?:minutes?|mins?|m)\s*$/i.exec(s)
+  if (minsOnly) {
+    return Number.parseInt(minsOnly[1], 10)
+  }
+
+  const hm =
+    /^\s*(\d+)\s*h(?:ours?)?\s*(\d+)\s*m(?:in(?:utes)?)?\s*$/i.exec(s)
+  if (hm) {
+    return Number.parseInt(hm[1], 10) * 60 + Number.parseInt(hm[2], 10)
+  }
+
+  const leading = Number.parseInt(s, 10)
+  if (Number.isFinite(leading) && leading > 0) return leading
+
+  return NaN
 }
 
 /**
@@ -62,25 +102,18 @@ export function parseGenerateBody(body) {
   const mood = body.mood
   const memoryRecent = sanitizeMemoryRecent(body.memory)
 
-  const lines = tasksRaw
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean)
+  const lines = taskStringsFromRaw(tasksRaw)
 
   if (lines.length === 0) {
     throw new ValidationError("Enter at least one task (one per line)")
   }
 
-  const timeRaw = body.time
-  const timeNum =
-    typeof timeRaw === "number"
-      ? timeRaw
-      : typeof timeRaw === "string"
-        ? Number.parseInt(timeRaw, 10)
-        : NaN
+  const timeNum = parseTimeMinutes(body.time)
 
   if (!Number.isFinite(timeNum) || timeNum <= 0) {
-    throw new ValidationError("Time available must be a positive number (minutes)")
+    throw new ValidationError(
+      "Time available must be a positive duration (e.g. 90, 2 hours, 1h 30m)",
+    )
   }
 
   let asOfIso = null

@@ -1,8 +1,12 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { generateNextAction } from "../src/generateNextAction.js"
-import { parseTaskLine } from "../src/normalizeTasks.js"
-import { ValidationError, parseGenerateBody } from "../src/parseBody.js"
+import { parseTaskLine, taskStringsFromRaw } from "../src/normalizeTasks.js"
+import {
+  ValidationError,
+  parseGenerateBody,
+  parseTimeMinutes,
+} from "../src/parseBody.js"
 import { formatSentinelRiskLine } from "../src/sentinel.js"
 
 test("parseGenerateBody rejects empty tasks", () => {
@@ -56,11 +60,45 @@ test("formatSentinelRiskLine includes before/after index and memory", () => {
   assert.match(line, /Session memory/)
 })
 
+test("taskStringsFromRaw splits comma-separated chores on one line", () => {
+  assert.deepEqual(taskStringsFromRaw("CS 178 homework, washing dishes"), [
+    "CS 178 homework",
+    "washing dishes",
+  ])
+})
+
+test("taskStringsFromRaw keeps line with est/due as one task", () => {
+  const t = taskStringsFromRaw("Part A, Part B est:45 due:2026-04-22")
+  assert.equal(t.length, 1)
+})
+
+test("parseTimeMinutes accepts hours and combined h/m", () => {
+  assert.equal(parseTimeMinutes("2 hours"), 120)
+  assert.equal(parseTimeMinutes("90 min"), 90)
+  assert.equal(parseTimeMinutes("1h 30m"), 90)
+  assert.equal(parseTimeMinutes("1h30m"), 90)
+  assert.equal(parseTimeMinutes("45"), 45)
+})
+
 test("parseTaskLine extracts due and est", () => {
   const t = parseTaskLine("CS178 PSet est:90 due:2026-04-20", 0)
   assert.equal(t.estimatedMinutes, 90)
   assert.ok(t.dueAt?.startsWith("2026-04-20"))
   assert.match(t.title, /CS178 PSet/)
+})
+
+test("generateNextAction scores comma-separated tasks separately", async () => {
+  const out = await generateNextAction({
+    tasks: "CS 178 homework, washing dishes",
+    time: "2 hours",
+    mood: "2",
+    shortTermGoals: "getting A+",
+    longTermGoals: "internship and GPA",
+  })
+  assert.equal(out.orbit.ranked.length, 2)
+  const titles = out.orbit.ranked.map((r) => r.title.toLowerCase())
+  assert.ok(titles.some((t) => t.includes("178") || t.includes("homework")))
+  assert.ok(titles.some((t) => t.includes("wash")))
 })
 
 test("generateNextAction ranks nearer deadline higher (fixed asOf)", async () => {

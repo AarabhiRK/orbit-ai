@@ -1,3 +1,53 @@
+const MAX_TASK_INPUTS = 50
+const MAX_TASK_PART_LEN = 180
+const MIN_TASK_PART_LEN = 2
+
+/**
+ * Split the tasks textarea into individual task strings.
+ * - Primary: one task per line.
+ * - If a line has no `est:` / `due:` hints, comma- or semicolon-separated
+ *   phrases become separate tasks (e.g. "CS178 homework, wash dishes").
+ * - Lines with `est:` or `due:` stay a single task so metadata applies once.
+ *
+ * @param {string} tasksRaw
+ * @returns {string[]}
+ */
+export function taskStringsFromRaw(tasksRaw) {
+  const rawLines = String(tasksRaw ?? "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+
+  const out = []
+  for (const line of rawLines) {
+    if (out.length >= MAX_TASK_INPUTS) break
+
+    if (/\b(?:est|due):/i.test(line)) {
+      out.push(line)
+      continue
+    }
+
+    const parts = line
+      .split(/[,;]\s*/)
+      .map((p) => p.trim())
+      .filter(
+        (p) =>
+          p.length >= MIN_TASK_PART_LEN && p.length <= MAX_TASK_PART_LEN,
+      )
+
+    if (parts.length >= 2) {
+      for (const p of parts) {
+        if (out.length >= MAX_TASK_INPUTS) break
+        out.push(p)
+      }
+    } else {
+      out.push(line)
+    }
+  }
+
+  return out
+}
+
 /**
  * One task per line. Optional hints (stripped from title):
  *   due:2026-04-20  or  due:2026-04-20T23:59:00Z

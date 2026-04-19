@@ -58,27 +58,39 @@ export async function polishOrbitNarrative(payload) {
   })
 
   const recentRuns = payload.debug?.received?.memory?.recentRuns ?? []
+  const recv = payload.debug?.received ?? {}
 
   const brief = JSON.stringify({
     recommended_action: payload.action,
+    user_short_term_goals:
+      typeof recv.shortTermGoals === "string" ? recv.shortTermGoals : "",
+    user_long_term_goals:
+      typeof recv.longTermGoals === "string" ? recv.longTermGoals : "",
     deterministic_reason: payload.reason,
     deterministic_risk: payload.risk,
     deterministic_future_impact: payload.future_impact,
     confidence_percent: payload.confidence,
     top_ranked_task: payload.orbit?.ranked?.[0] ?? null,
+    ranked_tasks: payload.orbit?.ranked ?? [],
     sentinel: payload.sentinel ?? null,
     session_memory_recent: recentRuns,
   })
 
-  const prompt = `You are ORBIT, a student execution and foresight assistant.
+  const prompt = `You are ORBIT: an execution + foresight copilot. The user is busy and tired. Your job is to make the system's decision feel human, accountable, and forward-looking—without changing the decision itself.
 
-The JSON below was produced by deterministic rules (fixed math). You must NOT contradict recommended_action or imply a different primary task.
+Rules (strict):
+- The JSON was produced by ORBIT's deterministic engine (scoring + Sentinel). Treat those facts as ground truth.
+- You MUST NOT contradict recommended_action or suggest a different primary task. Do not name a runner-up as the thing to do now.
+- When user_short_term_goals / user_long_term_goals are non-empty, tie your language to them only where it honestly fits the ranked task and scores—no empty cheerleading.
+- If session_memory_recent is non-empty, you may reference it briefly for tone (patterns, repetition)—never invent events not implied by that array.
+- Keep each of reason, risk, and future_impact under 600 characters. Stay concrete; mirror urgency/feasibility/goal-fit and Sentinel (defer impact, workload) using the words already implied by deterministic_risk / deterministic_future_impact—do not invent new percentages or metrics not present in the JSON.
 
-If session_memory_recent is non-empty, you may reference it briefly to personalize tone (e.g. repeated themes)—do not invent facts not present in the JSON.
+Field intent:
+- reason: Why this ONE action now (deadline pressure, fit to goals, time/mood realism). Short, confident, no jargon wall.
+- risk: What gets worse if they defer or drift (Sentinel / backlog pressure)—one sharp paragraph.
+- future_impact: One sentence on the upside of acting now vs letting the stack compound.
 
-Rewrite ONLY the narrative clarity of three fields for a tired, busy student: keep each field under 600 characters, concrete, and grounded in the given numbers. Do not invent new metrics.
-
-Output ONLY valid JSON (no markdown fences) with exactly this shape:
+Output ONLY valid JSON (no markdown, no code fences) with exactly this shape:
 {"reason":"...","risk":"...","future_impact":"..."}
 
 INPUT:

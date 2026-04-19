@@ -1,5 +1,5 @@
 import { parseGenerateBody } from "./parseBody.js"
-import { normalizeTasksFromLines } from "./normalizeTasks.js"
+import { normalizeTasksFromLines, taskStringsFromRaw } from "./normalizeTasks.js"
 import { ORBIT_WEIGHTS } from "./constants.js"
 import { confidencePercent, scoreTasks } from "./scoring.js"
 import { formatSentinelRiskLine, sentinelDeferSnapshot } from "./sentinel.js"
@@ -24,10 +24,7 @@ function buildSteps(task) {
  */
 export async function generateNextAction(body) {
   const parsed = parseGenerateBody(body)
-  const lines = parsed.tasksRaw
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean)
+  const lines = taskStringsFromRaw(parsed.tasksRaw)
 
   const tasks = normalizeTasksFromLines(lines)
   const asOfMs = parsed.asOfIso ? Date.parse(parsed.asOfIso) : Date.now()

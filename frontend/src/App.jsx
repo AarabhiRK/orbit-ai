@@ -47,51 +47,60 @@ export default function App() {
   const [longTermGoals, setLongTermGoals] = useState("");
 
   const generate = async () => {
-  setLoading(true);
-  setResult(null);
+    setLoading(true);
+    setResult(null);
 
-  try {
-    const res = await fetch(`${apiBase}/generate-next-action`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tasks,
-        mood,
-        time,
-        shortTermGoals,
-        longTermGoals,
-        memory: loadSessionMemory(),
-      }),
-    });
-
-    const data = await res.json();
-    if (!res.ok) {
-      setResult({
-        action: "Could not generate next action",
-        reason: data.error ?? `Server error (${res.status})`,
-        steps: ["Check tasks (one per line)", "Set time available > 0", "Retry"],
-        risk: "—",
-        future_impact: "—",
-        confidence: 50,
-        inputError: true,
+    try {
+      const res = await fetch(`${apiBase}/generate-next-action`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tasks,
+          mood,
+          time,
+          shortTermGoals,
+          longTermGoals,
+          memory: loadSessionMemory(),
+        }),
       });
-      return;
-    }
-    setResult(data);
-    rememberRun(data);
-  } catch {
-    setResult({
-      action: "Backend not connected yet",
-      reason: "We still need to start the server",
-      steps: ["Start backend", "Connect API", "Retry"],
-      risk: "System incomplete",
-      future_impact: "Cannot generate predictions without backend",
-      confidence: 0,
-    });
-  }
 
-  setLoading(false);
-};
+      let data = {};
+      try {
+        data = await res.json();
+      } catch {
+        data = { error: `Invalid response from server (${res.status})` };
+      }
+
+      if (!res.ok) {
+        setResult({
+          action: "Could not generate next action",
+          reason:
+            typeof data.error === "string"
+              ? data.error
+              : `Server error (${res.status})`,
+          steps: ["Check tasks (one per line)", "Set time available > 0", "Retry"],
+          risk: "—",
+          future_impact: "—",
+          confidence: 50,
+          inputError: true,
+        });
+        return;
+      }
+      setResult(data);
+      rememberRun(data);
+    } catch {
+      setResult({
+        action: "Backend not connected yet",
+        reason: "We still need to start the server",
+        steps: ["Start backend", "Connect API", "Retry"],
+        risk: "System incomplete",
+        future_impact: "Cannot generate predictions without backend",
+        confidence: 0,
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div style={{ maxWidth: 600, margin: "40px auto", fontFamily: "sans-serif" }}>
@@ -117,7 +126,7 @@ export default function App() {
       </p>
 
       <textarea
-        placeholder="Enter tasks (one per line; optional est:90 due:2026-04-22)"
+        placeholder="Tasks: one per line, or several on one line separated by commas (e.g. CS homework, dishes). ORBIT picks one winner. Optional per line: est:90 due:2026-04-22. Time field: minutes or phrases like 2 hours, 90 min."
         style={{ width: "100%", padding: 10, marginBottom: 10 }}
         onChange={(e) => setTasks(e.target.value)}
         value={tasks}
@@ -145,7 +154,7 @@ export default function App() {
       />
 
       <input
-        placeholder="Time available (minutes)"
+        placeholder="Time available (e.g. 90, 2 hours, 1h 30m)"
         style={{ width: "100%", padding: 10, marginBottom: 10 }}
         onChange={(e) => setTime(e.target.value)}
         value={time}
@@ -175,6 +184,48 @@ export default function App() {
         <div style={{ marginTop: 30, padding: 20, border: "1px solid #ddd", textAlign: "left" }}>
           
           <h2 style={{ textAlign: "center", marginTop: 0 }}>Next Action</h2>
+
+          {!result.inputError &&
+            Array.isArray(result.orbit?.ranked) &&
+            result.orbit.ranked.length > 0 && (
+              <div
+                style={{
+                  marginBottom: 18,
+                  padding: "12px 14px",
+                  background: "#f8fafc",
+                  borderRadius: 8,
+                  fontSize: 14,
+                  color: "#334155",
+                }}
+              >
+                <b>Chosen from your list</b>
+                <p style={{ margin: "6px 0 0", color: "#64748b", lineHeight: 1.45 }}>
+                  {result.orbit.ranked.length === 1
+                    ? "You entered one task — that becomes the next action."
+                    : `ORBIT scored ${result.orbit.ranked.length} tasks (one line each) and ranked them. The headline below is the single winner for right now.`}
+                </p>
+                {result.orbit.ranked.length > 1 && (
+                  <ol style={{ margin: "10px 0 0", paddingLeft: 22, lineHeight: 1.5 }}>
+                    {result.orbit.ranked.map((r, i) => (
+                      <li
+                        key={r.id ?? i}
+                        style={{
+                          fontWeight: i === 0 ? 600 : 400,
+                          color: i === 0 ? "#0f172a" : "#475569",
+                        }}
+                      >
+                        {r.title}
+                        <span style={{ color: "#94a3b8", fontWeight: 400 }}>
+                          {" "}
+                          — orbit {r.orbitScore}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </div>
+            )}
+
           <h3
             style={{
               fontSize: 24,
